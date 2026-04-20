@@ -50,8 +50,8 @@ export default function DatePicker({ onSelect }: Props) {
     return d.getTime() >= rangeStart.getTime() && d.getTime() <= rangeEnd.getTime();
   }
 
-  function handleDayClick(day: number) {
-    const clicked = new Date(viewYear, viewMonth, day);
+  function handleDayClick(year: number, month: number, day: number) {
+    const clicked = new Date(year, month, day);
     if (clicked < today) return; // prevent past dates
 
     if (!startDate || (startDate && endDate)) {
@@ -139,7 +139,7 @@ export default function DatePicker({ onSelect }: Props) {
               <div
                 key={`d${day}`}
                 className={cls}
-                onClick={() => !isPast && handleDayClick(day)}
+                onClick={() => !isPast && handleDayClick(year, month, day)}
                 onMouseEnter={() => !isPast && setHoveredDate(date)}
               >
                 {day}
