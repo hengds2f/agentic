@@ -27,19 +27,25 @@ class PlannerAgent(BaseAgent):
         ready = len(missing) == 0
 
         if ready:
+            adults = updated_trip.get('num_adults', 1)
+            children = updated_trip.get('num_children', 0)
+            pax = f"{adults} adult{'s' if adults != 1 else ''}"
+            if children > 0:
+                pax += f" and {children} child{'ren' if children != 1 else ''}"
             reply = (
                 f"Great! I have everything I need to plan your trip to **{updated_trip.get('destination', '')}** "
                 f"from {updated_trip.get('start_date', '?')} to {updated_trip.get('end_date', '?')}. "
-                f"Budget: ${updated_trip.get('budget_total', 0):,.0f}. "
+                f"Travelers: {pax}. Budget: ${updated_trip.get('budget_total', 0):,.0f}. "
                 f"Let me search for the best options now..."
             )
         else:
             prompts = {
                 "destination": "Where would you like to go?",
+                "origin": "Where will you be traveling from? (city and country)",
                 "start_date": "What are your travel dates? (start date)",
                 "end_date": "And your return date?",
-                "budget_total": "What's your approximate budget for the trip?",
-                "origin": "Where will you be traveling from?",
+                "num_adults": "How many people are going? (e.g. 2 adults, 1 child)",
+                "budget_total": "What's your approximate budget for the trip? (e.g. 3000)",
             }
             questions = [prompts.get(f, f"Could you tell me about {f}?") for f in missing[:2]]
             reply = " ".join(questions)
@@ -62,9 +68,16 @@ class PlannerAgent(BaseAgent):
             if mood in msg:
                 updated["mood"] = mood
 
-        # Detect budget
+        # Detect budget — accept "$3000", "3000", "3,000", "budget 3000", etc.
         import re
         budget_match = re.search(r'\$\s*([\d,]+)', message)
+        if not budget_match:
+            budget_match = re.search(r'(?:budget\s*(?:is|of|:)?\s*)([\d,]+)', message, re.IGNORECASE)
+        if not budget_match:
+            # Bare number (only if message is mostly just a number)
+            bare = message.strip().replace(',', '')
+            if re.fullmatch(r'\d+(?:\.\d+)?', bare):
+                budget_match = re.fullmatch(r'([\d,]+(?:\.\d+)?)', message.strip())
         if budget_match:
             updated["budget_total"] = float(budget_match.group(1).replace(",", ""))
 
@@ -78,6 +91,17 @@ class PlannerAgent(BaseAgent):
                 updated["start_date"] = date_matches[0]
             else:
                 updated["end_date"] = date_matches[0]
+
+        # Detect number of travelers: "2 adults", "3 adults 2 children", "5 people", etc.
+        adults_match = re.search(r'(\d+)\s*adults?', message, re.IGNORECASE)
+        children_match = re.search(r'(\d+)\s*(?:children|child|kids?)', message, re.IGNORECASE)
+        people_match = re.search(r'(\d+)\s*(?:people|persons?|pax|travelers?|travellers?)', message, re.IGNORECASE)
+        if adults_match:
+            updated["num_adults"] = int(adults_match.group(1))
+        if children_match:
+            updated["num_children"] = int(children_match.group(1))
+        if people_match and not adults_match:
+            updated["num_adults"] = int(people_match.group(1))
 
         # Detect "from <city>" first so we can exclude origin from destinations
         from_match = re.search(r'from\s+([a-zA-Z\s]+?)(?:\s*,|\s+to\s+|\s*$|\s+\d|\s+budget)', message, re.IGNORECASE)
@@ -123,5 +147,16 @@ class PlannerAgent(BaseAgent):
         return updated
 
     def _check_missing(self, trip: dict) -> list[str]:
-        required = ["destination", "start_date", "end_date", "budget_total"]
-        return [f for f in required if not trip.get(f)]
+        required = ["destination", "origin", "start_date", "end_date", "budget_total", "num_adults"]
+        missing = []
+        for f in required:
+            val = trip.get(f)
+            if f == "num_adults":
+                # num_adults defaults to 1, so it's only "missing" if never confirmed
+                # We treat it as present if it has a value >= 1
+                if not val or val < 1:
+                    missing.append(f)
+            else:
+                if not val:
+                    missing.append(f)
+        return missing

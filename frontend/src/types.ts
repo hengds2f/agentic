@@ -14,6 +14,8 @@ export interface TripRequest {
   end_date: string | null;
   budget_total: number | null;
   budget_currency: string;
+  num_adults: number;
+  num_children: number;
   travelers: TravelerProfile[];
   mood: string;
   interests: string[];

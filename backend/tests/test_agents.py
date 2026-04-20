@@ -51,9 +51,12 @@ async def test_planner_ready_when_complete():
         "trip": {
             "trip_id": "t1",
             "destination": "Paris",
+            "origin": "London",
             "start_date": "2026-07-01",
             "end_date": "2026-07-05",
             "budget_total": 3000,
+            "num_adults": 2,
+            "num_children": 0,
         },
         "user_message": "looks good",
         "history": [],

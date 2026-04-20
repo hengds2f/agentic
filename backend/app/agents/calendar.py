@@ -95,6 +95,11 @@ class CalendarAgent(BaseAgent):
 
         num_days = max((end_date - start_date).days, 1)
         destination = trip.get("destination", "the destination")
+        num_adults = trip.get("num_adults", 1) or 1
+        num_children = trip.get("num_children", 0) or 0
+        total_pax = num_adults + num_children
+        # Children get half-price for activities and meals
+        cost_multiplier = num_adults + num_children * 0.5
 
         # Select best hotel
         best_hotel = min(hotels, key=lambda h: h.get("price_per_night", 9999)) if hotels else None
@@ -107,14 +112,15 @@ class CalendarAgent(BaseAgent):
         # ── Cluster activities geographically into day groups ──
         # Separate indoor vs outdoor for weather swapping
         indoor_acts = [a for a in activities if not a.get("weather_sensitive", False)]
-        outdoor_acts = [a for a in activities if a.get("weather_sensitive", False)]
 
-        # We need activities for sightseeing days (exclude arrival/departure partial days)
-        full_days = max(num_days - 1, 1)  # first day is arrival, last day may be departure
-        acts_per_day = 3  # morning, early afternoon, late afternoon
+        # Every day gets sightseeing: arrival day gets 1, departure day gets 1,
+        # middle days get 3 each.
+        acts_per_day = 3
+        # Number of activity groups = total days (every day gets planned)
+        num_groups = max(num_days, 1)
 
         # Cluster all activities into day groups for geographic proximity
-        day_groups = _cluster_activities(list(activities), full_days)
+        day_groups = _cluster_activities(list(activities), num_groups)
 
         # Ensure each group has enough activities (borrow from larger groups)
         for i, grp in enumerate(day_groups):
@@ -142,6 +148,7 @@ class CalendarAgent(BaseAgent):
             # ── Day 1: Arrival ──
             if is_first_day and flights:
                 best_flight = min(flights, key=lambda f: f["price"])
+                flight_cost = best_flight.get("price", 0) * cost_multiplier
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
                     day=day_num + 1,
@@ -149,11 +156,11 @@ class CalendarAgent(BaseAgent):
                     end_time=dt_time(12, 0),
                     title=f"Flight: {best_flight.get('airline', 'Airline')}",
                     category="flight",
-                    description=f"{best_flight.get('departure_airport', '')} → {best_flight.get('arrival_airport', '')}",
-                    cost=best_flight.get("price", 0),
-                    reasoning="Cheapest direct option for your dates",
+                    description=f"{best_flight.get('departure_airport', '')} → {best_flight.get('arrival_airport', '')} ({total_pax} pax)",
+                    cost=flight_cost,
+                    reasoning=f"Cheapest direct option for your dates × {total_pax} travelers",
                 ))
-                day_cost += best_flight.get("price", 0)
+                day_cost += flight_cost
 
             # Hotel check-in on day 1
             if is_first_day and best_hotel:
@@ -178,37 +185,36 @@ class CalendarAgent(BaseAgent):
 
             if is_first_day and num_days > 1:
                 # Arrival day: 1 nearby activity in the afternoon
-                group_idx = 0
                 day_acts = day_groups[0][:1] if day_groups and day_groups[0] else []
                 self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
                                      start_times=[dt_time(15, 30)],
-                                     end_times=[dt_time(17, 30)])
-                day_cost += sum(a.get("price", 0) for a in day_acts)
+                                     end_times=[dt_time(17, 30)],
+                                     cost_multiplier=cost_multiplier)
+                day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
             elif is_last_day and num_days > 1:
                 # Departure day: 1 morning activity
-                last_group = day_groups[-1] if len(day_groups) >= full_days else []
-                day_acts = last_group[:1] if last_group else []
+                day_acts = day_groups[day_num][:1] if day_num < len(day_groups) and day_groups[day_num] else []
                 self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
                                      start_times=[dt_time(9, 0)],
-                                     end_times=[dt_time(11, 0)])
-                day_cost += sum(a.get("price", 0) for a in day_acts)
+                                     end_times=[dt_time(11, 0)],
+                                     cost_multiplier=cost_multiplier)
+                day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
             else:
                 # Full sightseeing day: 3 activities
-                if num_days == 1:
-                    group_idx = 0
-                else:
-                    group_idx = max(day_num - 1, 0)  # skip arrival day group offset
+                group_idx = day_num
                 day_acts = day_groups[group_idx][:acts_per_day] if group_idx < len(day_groups) else []
                 self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
                                      start_times=[dt_time(9, 30), dt_time(14, 0), dt_time(16, 0)],
-                                     end_times=[dt_time(11, 30), dt_time(15, 30), dt_time(17, 30)])
-                day_cost += sum(a.get("price", 0) for a in day_acts)
+                                     end_times=[dt_time(11, 30), dt_time(15, 30), dt_time(17, 30)],
+                                     cost_multiplier=cost_multiplier)
+                day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
 
             # ── Meals ──
             # Lunch
             if restaurant_idx < len(restaurants):
                 rest = restaurants[restaurant_idx]
                 lunch_time = dt_time(12, 0) if not is_first_day else dt_time(13, 0)
+                lunch_cost = 25.0 * cost_multiplier
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
                     day=day_num + 1,
@@ -216,17 +222,18 @@ class CalendarAgent(BaseAgent):
                     end_time=dt_time(lunch_time.hour + 1, 0),
                     title=f"Lunch: {rest.get('name', 'Restaurant')}",
                     category="food",
-                    description=f"{rest.get('cuisine', '')} cuisine",
-                    cost=25.0,
+                    description=f"{rest.get('cuisine', '')} cuisine — ⭐ {rest.get('rating', 4.0)}",
+                    cost=lunch_cost,
                     location=rest.get("address", ""),
-                    reasoning=f"Highly rated {rest.get('cuisine', 'local')} restaurant nearby",
+                    reasoning=f"Highly rated {rest.get('cuisine', 'local')} restaurant — see Google reviews",
                 ))
-                day_cost += 25.0
+                day_cost += lunch_cost
                 restaurant_idx += 1
 
             # Dinner
             if restaurant_idx < len(restaurants):
                 rest = restaurants[restaurant_idx]
+                dinner_cost = 40.0 * cost_multiplier
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
                     day=day_num + 1,
@@ -234,12 +241,12 @@ class CalendarAgent(BaseAgent):
                     end_time=dt_time(20, 30),
                     title=f"Dinner: {rest.get('name', 'Restaurant')}",
                     category="food",
-                    description=f"{rest.get('cuisine', '')} cuisine",
-                    cost=40.0,
+                    description=f"{rest.get('cuisine', '')} cuisine — ⭐ {rest.get('rating', 4.0)}",
+                    cost=dinner_cost,
                     location=rest.get("address", ""),
-                    reasoning="Great dinner spot with atmosphere matching your trip mood",
+                    reasoning="Top-rated dinner spot — check Google Maps for reviews and photos",
                 ))
-                day_cost += 40.0
+                day_cost += dinner_cost
                 restaurant_idx += 1
 
             # ── Last day: departure flight ──
@@ -266,7 +273,7 @@ class CalendarAgent(BaseAgent):
                 day_title = f"Departure from {destination}"
             else:
                 # Use the activities planned for thematic title
-                planned_acts = day_groups[max(day_num - 1, 0)] if (day_num - 1) < len(day_groups) else []
+                planned_acts = day_groups[day_num] if day_num < len(day_groups) else []
                 day_title = _day_theme(planned_acts[:acts_per_day])
 
             total_cost += day_cost
@@ -309,6 +316,7 @@ class CalendarAgent(BaseAgent):
         trip: dict,
         start_times: list[dt_time],
         end_times: list[dt_time],
+        cost_multiplier: float = 1.0,
     ) -> None:
         """Add activity items to the day, handling weather substitution."""
         used_indoor: set[str] = set()
@@ -348,7 +356,7 @@ class CalendarAgent(BaseAgent):
                 title=chosen.get("name", "Sightseeing"),
                 category="activity",
                 description=chosen.get("description", ""),
-                cost=chosen.get("price", 0),
+                cost=chosen.get("price", 0) * cost_multiplier,
                 location=chosen.get("address", ""),
                 reasoning=f"Top-rated {chosen.get('category', 'attraction')} in {trip.get('destination', 'the area')}",
                 weather_note=weather_note,
