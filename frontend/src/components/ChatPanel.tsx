@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import type { ChatMessage } from '../types';
+import DatePicker from './DatePicker';
 
 interface Props {
   messages: ChatMessage[];
@@ -7,13 +8,31 @@ interface Props {
   loading: boolean;
 }
 
+function needsDatePicker(messages: ChatMessage[]): boolean {
+  if (messages.length === 0) return false;
+  const last = messages[messages.length - 1];
+  if (last.role !== 'assistant') return false;
+  const lower = last.content.toLowerCase();
+  return (
+    (lower.includes('date') || lower.includes('when')) &&
+    (lower.includes('travel') || lower.includes('start') || lower.includes('trip') || lower.includes('return'))
+  );
+}
+
 export default function ChatPanel({ messages, onSend, loading }: Props) {
   const [input, setInput] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [showDatePicker, setShowDatePicker] = useState(false);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    if (!loading && needsDatePicker(messages)) {
+      setShowDatePicker(true);
+    }
+  }, [messages, loading]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,6 +40,11 @@ export default function ChatPanel({ messages, onSend, loading }: Props) {
     if (!text || loading) return;
     setInput('');
     onSend(text);
+  };
+
+  const handleDateSelect = (startDate: string, endDate: string) => {
+    setShowDatePicker(false);
+    onSend(`My travel dates are ${startDate} to ${endDate}`);
   };
 
   return (
@@ -46,6 +70,9 @@ export default function ChatPanel({ messages, onSend, loading }: Props) {
               </div>
             </div>
           </div>
+        )}
+        {showDatePicker && !loading && (
+          <DatePicker onSelect={handleDateSelect} />
         )}
         <div ref={bottomRef} />
       </div>
