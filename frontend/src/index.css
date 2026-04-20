@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply antialiased text-gray-900;
+}
+
+.chat-bubble-user {
+  @apply bg-primary-600 text-white rounded-2xl rounded-br-sm px-4 py-2 max-w-[80%] ml-auto;
+}
+
+.chat-bubble-assistant {
+  @apply bg-white border border-gray-200 rounded-2xl rounded-bl-sm px-4 py-2 max-w-[80%] shadow-sm;
+}
