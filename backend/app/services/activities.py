@@ -24,6 +24,8 @@ _CATEGORY_MAP = {
     "place_of_worship": "cultural",
     "stadium": "sports", "sports_centre": "sports",
     "beach": "nature", "marina": "nature",
+    "marketplace": "shopping", "mall": "shopping",
+    "information": "sightseeing",
 }
 
 _WEATHER_SENSITIVE = {"nature", "sightseeing", "sports", "entertainment"}
@@ -35,28 +37,35 @@ class ActivityService:
         destination: str,
         interests: list[str] | None = None,
         mood: str = "relaxing",
-        radius: int = 5000,
-        limit: int = 15,
+        radius: int = 10000,
+        limit: int = 30,
     ) -> list[ActivityOption]:
         geo = await geocode(destination)
         if not geo:
             logger.warning("activities.no_geocode", destination=destination)
             return []
 
+        fetch_limit = limit * 4  # fetch extra to filter and deduplicate
+
         query = f"""
-[out:json][timeout:20];
+[out:json][timeout:25];
 (
-  node["tourism"~"museum|gallery|attraction|viewpoint|artwork|zoo|theme_park|aquarium"](around:{radius},{geo.lat},{geo.lng});
-  way["tourism"~"museum|gallery|attraction|viewpoint|artwork|zoo|theme_park|aquarium"](around:{radius},{geo.lat},{geo.lng});
+  node["tourism"~"museum|gallery|attraction|viewpoint|artwork|zoo|theme_park|aquarium|information"](around:{radius},{geo.lat},{geo.lng});
+  way["tourism"~"museum|gallery|attraction|viewpoint|artwork|zoo|theme_park|aquarium|information"](around:{radius},{geo.lat},{geo.lng});
+  relation["tourism"~"museum|gallery|attraction|viewpoint|artwork|zoo|theme_park|aquarium"](around:{radius},{geo.lat},{geo.lng});
   node["leisure"~"park|garden|nature_reserve|marina|beach|stadium|sports_centre"](around:{radius},{geo.lat},{geo.lng});
   way["leisure"~"park|garden|nature_reserve|marina|beach|stadium|sports_centre"](around:{radius},{geo.lat},{geo.lng});
   node["historic"](around:{radius},{geo.lat},{geo.lng});
   way["historic"](around:{radius},{geo.lat},{geo.lng});
+  node["amenity"~"marketplace|place_of_worship"](around:{radius},{geo.lat},{geo.lng});
+  way["amenity"~"marketplace|place_of_worship"](around:{radius},{geo.lat},{geo.lng});
+  node["shop"="mall"](around:{radius},{geo.lat},{geo.lng});
+  way["shop"="mall"](around:{radius},{geo.lat},{geo.lng});
 );
-out center {limit * 3};
+out center {fetch_limit};
 """
         try:
-            async with httpx.AsyncClient(timeout=25, headers=_HEADERS) as client:
+            async with httpx.AsyncClient(timeout=30, headers=_HEADERS) as client:
                 resp = await client.post(OVERPASS_URL, data={"data": query})
                 resp.raise_for_status()
                 data = resp.json()

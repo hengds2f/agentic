@@ -2,11 +2,69 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date as dt_date, time as dt_time
+from datetime import date as dt_date, time as dt_time, timedelta
+from math import atan2, cos, radians, sin, sqrt
 from typing import Any
 
 from app.agents.base import BaseAgent
 from app.models.schemas import AgentRole, DayPlan, Itinerary, ItineraryItem, WeatherForecast
+
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distance in km between two lat/lon points."""
+    R = 6371.0
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def _cluster_activities(activities: list[dict], num_groups: int) -> list[list[dict]]:
+    """Simple geographic clustering: sort by distance from centroid, split into groups."""
+    if not activities:
+        return [[] for _ in range(num_groups)]
+
+    # Calculate centroid
+    avg_lat = sum(a.get("latitude", 0) for a in activities) / len(activities)
+    avg_lon = sum(a.get("longitude", 0) for a in activities) / len(activities)
+
+    # Sort by angle from centroid to group nearby POIs together
+    from math import atan2 as _atan2
+    for a in activities:
+        a["_angle"] = _atan2(a.get("latitude", 0) - avg_lat, a.get("longitude", 0) - avg_lon)
+    sorted_acts = sorted(activities, key=lambda a: a["_angle"])
+
+    # Split into roughly equal groups
+    groups: list[list[dict]] = [[] for _ in range(num_groups)]
+    for i, act in enumerate(sorted_acts):
+        groups[i % num_groups].append(act)
+    return groups
+
+
+def _day_theme(activities: list[dict]) -> str:
+    """Generate a thematic day title from the activities planned."""
+    if not activities:
+        return "Free Exploration"
+    categories = [a.get("category", "") for a in activities]
+    names = [a.get("name", "") for a in activities]
+
+    # Use primary activity name for the title
+    primary = names[0] if names else "Exploration"
+    if len(names) > 1:
+        return f"{primary} & Nearby Sights"
+
+    cat_labels = {
+        "museum": "Museum & Culture",
+        "historic": "Historic Sites",
+        "nature": "Nature & Parks",
+        "sightseeing": "Sightseeing",
+        "entertainment": "Entertainment",
+        "cultural": "Cultural Discovery",
+        "sports": "Sports & Recreation",
+        "shopping": "Shopping & Markets",
+    }
+    main_cat = max(set(categories), key=categories.count) if categories else ""
+    return cat_labels.get(main_cat, primary)
 
 
 class CalendarAgent(BaseAgent):
@@ -18,8 +76,6 @@ class CalendarAgent(BaseAgent):
     async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         trip = context["trip"]
         gathered = context.get("gathered", {})
-        budget_data = context.get("budget", {})
-        route_data = context.get("route", {})
 
         flights = gathered.get("flights", {}).get("flights", [])
         hotels = gathered.get("hotels", {}).get("hotels", [])
@@ -38,6 +94,7 @@ class CalendarAgent(BaseAgent):
             end_date = start_date
 
         num_days = max((end_date - start_date).days, 1)
+        destination = trip.get("destination", "the destination")
 
         # Select best hotel
         best_hotel = min(hotels, key=lambda h: h.get("price_per_night", 9999)) if hotels else None
@@ -47,13 +104,31 @@ class CalendarAgent(BaseAgent):
         for f in forecasts:
             forecast_map[str(f.get("date", ""))] = f
 
+        # ── Cluster activities geographically into day groups ──
+        # Separate indoor vs outdoor for weather swapping
+        indoor_acts = [a for a in activities if not a.get("weather_sensitive", False)]
+        outdoor_acts = [a for a in activities if a.get("weather_sensitive", False)]
+
+        # We need activities for sightseeing days (exclude arrival/departure partial days)
+        full_days = max(num_days - 1, 1)  # first day is arrival, last day may be departure
+        acts_per_day = 3  # morning, early afternoon, late afternoon
+
+        # Cluster all activities into day groups for geographic proximity
+        day_groups = _cluster_activities(list(activities), full_days)
+
+        # Ensure each group has enough activities (borrow from larger groups)
+        for i, grp in enumerate(day_groups):
+            while len(grp) < acts_per_day and any(len(g) > acts_per_day for g in day_groups):
+                donor = max(day_groups, key=len)
+                if len(donor) <= acts_per_day:
+                    break
+                grp.append(donor.pop())
+
         days: list[DayPlan] = []
-        activity_idx = 0
         restaurant_idx = 0
         total_cost = 0.0
 
         for day_num in range(num_days):
-            from datetime import timedelta
             current_date = start_date + timedelta(days=day_num)
             weather = forecast_map.get(str(current_date))
             weather_obj = WeatherForecast(**weather) if weather else None
@@ -61,9 +136,11 @@ class CalendarAgent(BaseAgent):
             items: list[ItineraryItem] = []
             day_cost = 0.0
             is_rainy = weather and weather.get("condition") in ("rainy", "stormy")
+            is_first_day = day_num == 0
+            is_last_day = day_num == num_days - 1
 
-            # Day 1: add arrival flight
-            if day_num == 0 and flights:
+            # ── Day 1: Arrival ──
+            if is_first_day and flights:
                 best_flight = min(flights, key=lambda f: f["price"])
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
@@ -79,7 +156,7 @@ class CalendarAgent(BaseAgent):
                 day_cost += best_flight.get("price", 0)
 
             # Hotel check-in on day 1
-            if day_num == 0 and best_hotel:
+            if is_first_day and best_hotel:
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
                     day=day_num + 1,
@@ -94,59 +171,49 @@ class CalendarAgent(BaseAgent):
                 ))
                 day_cost += best_hotel.get("price_per_night", 0)
 
-            # Morning activity
-            if activity_idx < len(activities):
-                act = activities[activity_idx]
-                # Skip weather-sensitive outdoor activities on rainy days
-                if is_rainy and act.get("weather_sensitive"):
-                    # Find indoor alternative
-                    backup_act = next(
-                        (a for a in activities[activity_idx + 1:] if not a.get("weather_sensitive")),
-                        act,
-                    )
-                    weather_note = "Moved indoors due to expected rain"
+            # ── Sightseeing activities ──
+            # Day 1: one afternoon activity after check-in
+            # Middle days: 3 activities (morning, early PM, late PM)
+            # Last day: 1 morning activity before departure
+
+            if is_first_day and num_days > 1:
+                # Arrival day: 1 nearby activity in the afternoon
+                group_idx = 0
+                day_acts = day_groups[0][:1] if day_groups and day_groups[0] else []
+                self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
+                                     start_times=[dt_time(15, 30)],
+                                     end_times=[dt_time(17, 30)])
+                day_cost += sum(a.get("price", 0) for a in day_acts)
+            elif is_last_day and num_days > 1:
+                # Departure day: 1 morning activity
+                last_group = day_groups[-1] if len(day_groups) >= full_days else []
+                day_acts = last_group[:1] if last_group else []
+                self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
+                                     start_times=[dt_time(9, 0)],
+                                     end_times=[dt_time(11, 0)])
+                day_cost += sum(a.get("price", 0) for a in day_acts)
+            else:
+                # Full sightseeing day: 3 activities
+                if num_days == 1:
+                    group_idx = 0
                 else:
-                    backup_act = None
-                    weather_note = ""
+                    group_idx = max(day_num - 1, 0)  # skip arrival day group offset
+                day_acts = day_groups[group_idx][:acts_per_day] if group_idx < len(day_groups) else []
+                self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
+                                     start_times=[dt_time(9, 30), dt_time(14, 0), dt_time(16, 0)],
+                                     end_times=[dt_time(11, 30), dt_time(15, 30), dt_time(17, 30)])
+                day_cost += sum(a.get("price", 0) for a in day_acts)
 
-                chosen = backup_act or act
-                backup_item = None
-                if backup_act and backup_act != act:
-                    backup_item = ItineraryItem(
-                        id=uuid.uuid4().hex[:8],
-                        day=day_num + 1,
-                        title=act.get("name", "Activity"),
-                        category="activity",
-                        description=act.get("description", ""),
-                        cost=act.get("price", 0),
-                        reasoning="Original plan if weather improves",
-                    )
-
-                items.append(ItineraryItem(
-                    id=uuid.uuid4().hex[:8],
-                    day=day_num + 1,
-                    start_time=dt_time(10, 0) if day_num > 0 else dt_time(15, 0),
-                    end_time=dt_time(12, 0) if day_num > 0 else dt_time(17, 0),
-                    title=chosen.get("name", "Activity"),
-                    category="activity",
-                    description=chosen.get("description", ""),
-                    cost=chosen.get("price", 0),
-                    location=chosen.get("address", ""),
-                    reasoning=f"Matches your {trip.get('mood', 'relaxing')} mood and interests",
-                    weather_note=weather_note,
-                    backup=backup_item,
-                ))
-                day_cost += chosen.get("price", 0)
-                activity_idx += 1
-
+            # ── Meals ──
             # Lunch
             if restaurant_idx < len(restaurants):
                 rest = restaurants[restaurant_idx]
+                lunch_time = dt_time(12, 0) if not is_first_day else dt_time(13, 0)
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
                     day=day_num + 1,
-                    start_time=dt_time(12, 30) if day_num > 0 else dt_time(18, 0),
-                    end_time=dt_time(13, 30) if day_num > 0 else dt_time(19, 0),
+                    start_time=lunch_time,
+                    end_time=dt_time(lunch_time.hour + 1, 0),
                     title=f"Lunch: {rest.get('name', 'Restaurant')}",
                     category="food",
                     description=f"{rest.get('cuisine', '')} cuisine",
@@ -156,24 +223,6 @@ class CalendarAgent(BaseAgent):
                 ))
                 day_cost += 25.0
                 restaurant_idx += 1
-
-            # Afternoon activity (from day 2)
-            if day_num > 0 and activity_idx < len(activities):
-                act = activities[activity_idx]
-                items.append(ItineraryItem(
-                    id=uuid.uuid4().hex[:8],
-                    day=day_num + 1,
-                    start_time=dt_time(14, 30),
-                    end_time=dt_time(16, 30),
-                    title=act.get("name", "Activity"),
-                    category="activity",
-                    description=act.get("description", ""),
-                    cost=act.get("price", 0),
-                    location=act.get("address", ""),
-                    reasoning="Complements your morning activity with a change of pace",
-                ))
-                day_cost += act.get("price", 0)
-                activity_idx += 1
 
             # Dinner
             if restaurant_idx < len(restaurants):
@@ -193,8 +242,8 @@ class CalendarAgent(BaseAgent):
                 day_cost += 40.0
                 restaurant_idx += 1
 
-            # Last day: departure flight
-            if day_num == num_days - 1 and flights:
+            # ── Last day: departure flight ──
+            if is_last_day and flights:
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
                     day=day_num + 1,
@@ -207,11 +256,24 @@ class CalendarAgent(BaseAgent):
                     reasoning="Return flight included in outbound booking",
                 ))
 
+            # Sort items by start_time for clean chronological order
+            items.sort(key=lambda it: (it.start_time or dt_time(0, 0)))
+
+            # ── Day title ──
+            if is_first_day:
+                day_title = f"Arrival in {destination}"
+            elif is_last_day and num_days > 1:
+                day_title = f"Departure from {destination}"
+            else:
+                # Use the activities planned for thematic title
+                planned_acts = day_groups[max(day_num - 1, 0)] if (day_num - 1) < len(day_groups) else []
+                day_title = _day_theme(planned_acts[:acts_per_day])
+
             total_cost += day_cost
             days.append(DayPlan(
                 day=day_num + 1,
                 date=current_date,
-                title=f"Day {day_num + 1}" + (" — Arrival" if day_num == 0 else ""),
+                title=f"Day {day_num + 1} — {day_title}",
                 items=items,
                 weather=weather_obj,
                 daily_spend=day_cost,
@@ -234,8 +296,64 @@ class CalendarAgent(BaseAgent):
 
         return {
             "itinerary": itinerary.model_dump(),
-            "summary": f"Built {num_days}-day itinerary, ${total_cost:,.0f} total",
+            "summary": f"Built {num_days}-day itinerary with {sum(len(g) for g in day_groups)} sightseeing locations, ${total_cost:,.0f} total",
         }
+
+    def _add_activities(
+        self,
+        items: list[ItineraryItem],
+        day_acts: list[dict],
+        day_num: int,
+        is_rainy: bool,
+        indoor_acts: list[dict],
+        trip: dict,
+        start_times: list[dt_time],
+        end_times: list[dt_time],
+    ) -> None:
+        """Add activity items to the day, handling weather substitution."""
+        used_indoor: set[str] = set()
+        for i, act in enumerate(day_acts):
+            if i >= len(start_times):
+                break
+            weather_note = ""
+            backup_item = None
+            chosen = act
+
+            if is_rainy and act.get("weather_sensitive"):
+                # Find an indoor alternative not already used
+                alt = next(
+                    (a for a in indoor_acts
+                     if a.get("id") not in used_indoor and a.get("id") != act.get("id")),
+                    None,
+                )
+                if alt:
+                    used_indoor.add(alt["id"])
+                    weather_note = "Moved indoors due to expected rain"
+                    backup_item = ItineraryItem(
+                        id=uuid.uuid4().hex[:8],
+                        day=day_num + 1,
+                        title=act.get("name", "Activity"),
+                        category="activity",
+                        description=act.get("description", ""),
+                        cost=act.get("price", 0),
+                        reasoning="Original plan if weather improves",
+                    )
+                    chosen = alt
+
+            items.append(ItineraryItem(
+                id=uuid.uuid4().hex[:8],
+                day=day_num + 1,
+                start_time=start_times[i],
+                end_time=end_times[i],
+                title=chosen.get("name", "Sightseeing"),
+                category="activity",
+                description=chosen.get("description", ""),
+                cost=chosen.get("price", 0),
+                location=chosen.get("address", ""),
+                reasoning=f"Top-rated {chosen.get('category', 'attraction')} in {trip.get('destination', 'the area')}",
+                weather_note=weather_note,
+                backup=backup_item,
+            ))
 
     def _generate_packing_list(self, trip: dict, forecasts: list) -> list[str]:
         items = ["Passport/ID", "Phone charger", "Travel adapter", "Comfortable walking shoes"]
