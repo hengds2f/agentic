@@ -28,7 +28,7 @@ def test_chat_full_flow():
     # Step 1: provide all details
     r = client.post("/api/chat", json={
         "trip_id": "",
-        "message": "Trip to Tokyo from London, 2026-08-01 to 2026-08-05, budget $5000",
+        "message": "Trip to Tokyo from London, 2026-08-01 to 2026-08-05, 2 adults",
     })
     assert r.status_code == 200
     data = r.json()
@@ -73,6 +73,7 @@ def test_plan_endpoint():
         "end_date": "2026-07-04",
         "budget_total": 3000,
         "budget_currency": "USD",
+        "num_adults": 2,
         "travelers": [{"name": "Alice", "interests": ["art", "food"]}],
         "mood": "relaxing",
         "interests": ["art", "food"],

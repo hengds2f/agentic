@@ -58,7 +58,7 @@ class TripRequest(BaseModel):
     end_date: date | None = None
     budget_total: float | None = None
     budget_currency: str = "USD"
-    num_adults: int = 1
+    num_adults: int | None = None
     num_children: int = 0
     travelers: list[TravelerProfile] = []
     mood: TripMood = TripMood.relaxing

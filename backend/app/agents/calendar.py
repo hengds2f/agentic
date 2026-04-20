@@ -75,6 +75,14 @@ class CalendarAgent(BaseAgent):
 
     async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         trip = context["trip"]
+
+        # ── Single-day regeneration ──
+        # When regenerating a specific day, keep existing itinerary intact
+        # and only rebuild the target day with fresh activity/food data.
+        regen_day = context.get("regenerate_day")
+        if regen_day and context.get("itinerary"):
+            return await self._regenerate_single_day(context, regen_day)
+
         gathered = context.get("gathered", {})
 
         flights = gathered.get("flights", {}).get("flights", [])
@@ -312,6 +320,112 @@ class CalendarAgent(BaseAgent):
         return {
             "itinerary": itinerary.model_dump(),
             "summary": f"Built {num_days}-day itinerary with {sum(len(g) for g in day_groups)} sightseeing locations, ${total_cost:,.0f} total",
+        }
+
+    async def _regenerate_single_day(self, context: dict[str, Any], day_num: int) -> dict[str, Any]:
+        """Rebuild only a single day, keeping all other days from the existing itinerary."""
+        trip = context["trip"]
+        existing = context["itinerary"]
+        existing_days = existing.get("days", [])
+
+        # Fresh data from the regeneration pipeline (top-level context keys)
+        activities = context.get("activities", {}).get("activities", [])
+        restaurants = context.get("food", {}).get("restaurants", [])
+
+        num_adults = trip.get("num_adults", 1) or 1
+        num_children = trip.get("num_children", 0) or 0
+        total_pax = num_adults + num_children
+        cost_multiplier = num_adults + num_children * 0.5
+        destination = trip.get("destination", "the destination")
+
+        # Find the existing day to replace
+        new_days = []
+        for day_data in existing_days:
+            if day_data.get("day") != day_num:
+                new_days.append(day_data)
+                continue
+
+            # Rebuild this day
+            current_date = day_data.get("date", "")
+            weather_data = day_data.get("weather")
+            weather_obj = WeatherForecast(**weather_data) if weather_data else None
+            is_rainy = weather_data and weather_data.get("condition") in ("rainy", "stormy") if weather_data else False
+            indoor_acts = [a for a in activities if not a.get("weather_sensitive", False)]
+
+            items: list[ItineraryItem] = []
+            day_cost = 0.0
+
+            # Keep flights and hotel items from the existing day
+            for item in day_data.get("items", []):
+                if item.get("category") in ("flight", "hotel"):
+                    items.append(ItineraryItem(**item))
+                    day_cost += item.get("cost", 0)
+
+            # Add fresh activities (up to 3)
+            day_acts = activities[:3] if activities else []
+            self._add_activities(items, day_acts, day_num - 1, is_rainy, indoor_acts, trip,
+                                 start_times=[dt_time(9, 30), dt_time(14, 0), dt_time(16, 0)],
+                                 end_times=[dt_time(11, 30), dt_time(15, 30), dt_time(17, 30)],
+                                 cost_multiplier=cost_multiplier)
+            day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
+
+            # Add fresh restaurants (lunch + dinner)
+            if restaurants:
+                lunch_cost = 25.0 * cost_multiplier
+                rest = restaurants[0]
+                items.append(ItineraryItem(
+                    id=uuid.uuid4().hex[:8], day=day_num,
+                    start_time=dt_time(12, 0), end_time=dt_time(13, 0),
+                    title=f"Lunch: {rest.get('name', 'Restaurant')}",
+                    category="food",
+                    description=f"{rest.get('cuisine', '')} cuisine — ⭐ {rest.get('rating', 4.0)}",
+                    cost=lunch_cost,
+                    location=rest.get("address", ""),
+                    latitude=rest.get("latitude", 0.0),
+                    longitude=rest.get("longitude", 0.0),
+                    booking_url=rest.get("booking_url", ""),
+                    reasoning=f"Highly rated {rest.get('cuisine', 'local')} restaurant",
+                ))
+                day_cost += lunch_cost
+
+                rest2 = restaurants[1 % len(restaurants)]
+                dinner_cost = 40.0 * cost_multiplier
+                items.append(ItineraryItem(
+                    id=uuid.uuid4().hex[:8], day=day_num,
+                    start_time=dt_time(19, 0), end_time=dt_time(20, 30),
+                    title=f"Dinner: {rest2.get('name', 'Restaurant')}",
+                    category="food",
+                    description=f"{rest2.get('cuisine', '')} cuisine — ⭐ {rest2.get('rating', 4.0)}",
+                    cost=dinner_cost,
+                    location=rest2.get("address", ""),
+                    latitude=rest2.get("latitude", 0.0),
+                    longitude=rest2.get("longitude", 0.0),
+                    booking_url=rest2.get("booking_url", ""),
+                    reasoning="Top-rated dinner spot — check Google Maps for reviews",
+                ))
+                day_cost += dinner_cost
+
+            items.sort(key=lambda it: (it.start_time or dt_time(0, 0)))
+
+            day_title = _day_theme(day_acts[:3])
+            new_days.append(DayPlan(
+                day=day_num,
+                date=dt_date.fromisoformat(str(current_date)) if current_date else dt_date.today(),
+                title=f"Day {day_num} — {day_title}",
+                items=items,
+                weather=weather_obj,
+                daily_spend=day_cost,
+            ).model_dump())
+
+        total_cost = sum(d.get("daily_spend", 0) if isinstance(d, dict) else d.daily_spend for d in new_days)
+
+        result_itin = dict(existing)
+        result_itin["days"] = new_days
+        result_itin["total_cost"] = total_cost
+
+        return {
+            "itinerary": result_itin,
+            "summary": f"Regenerated Day {day_num} with {len(activities)} new activities",
         }
 
     def _add_activities(

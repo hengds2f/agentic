@@ -24,6 +24,6 @@ export async function optimizeDay(tripId: string, day: number) {
   return res.json();
 }
 
-export function getExportUrl(tripId: string, format: 'html' | 'pdf' = 'html') {
+export function getExportUrl(tripId: string, format: 'html' | 'pdf' = 'pdf') {
   return `${BASE}/itinerary/export?trip_id=${tripId}&format=${format}`;
 }

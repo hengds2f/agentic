@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { Itinerary, DayPlan, ItineraryItem } from '../types';
 import { optimizeDay } from '../api';
 
@@ -56,7 +57,12 @@ export default function ItineraryView({ itinerary, tripId, onItineraryUpdated }:
   );
 }
 
-function DayCard({ day, onRegenerate }: { day: DayPlan; onRegenerate: () => void }) {
+function DayCard({ day, onRegenerate }: { day: DayPlan; onRegenerate: () => Promise<void> }) {
+  const [loading, setLoading] = useState(false);
+  const handleClick = async () => {
+    setLoading(true);
+    try { await onRegenerate(); } finally { setLoading(false); }
+  };
   return (
     <div className="border border-gray-200 rounded-xl overflow-hidden">
       <div className="bg-gray-50 px-5 py-3 flex items-center justify-between">
@@ -71,10 +77,11 @@ function DayCard({ day, onRegenerate }: { day: DayPlan; onRegenerate: () => void
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-500">${day.daily_spend.toFixed(0)}</span>
           <button
-            onClick={onRegenerate}
-            className="text-xs bg-primary-100 text-primary-700 px-2 py-1 rounded hover:bg-primary-200 transition"
+            onClick={handleClick}
+            disabled={loading}
+            className="text-xs bg-primary-100 text-primary-700 px-2 py-1 rounded hover:bg-primary-200 transition disabled:opacity-50"
           >
-            🔄 Regenerate
+            {loading ? '⏳ Regenerating...' : '🔄 Regenerate'}
           </button>
         </div>
       </div>
@@ -94,7 +101,18 @@ function ItemRow({ item }: { item: ItineraryItem }) {
         <span className="text-lg mt-0.5">{categoryIcons[item.category] || '📌'}</span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between">
-            <span className="font-medium text-sm">{item.title}</span>
+            {item.booking_url ? (
+              <a
+                href={item.booking_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-sm text-blue-600 hover:text-blue-800 hover:underline"
+              >
+                {item.title} ↗
+              </a>
+            ) : (
+              <span className="font-medium text-sm">{item.title}</span>
+            )}
             {item.cost > 0 && (
               <span className="text-sm text-gray-500">${item.cost.toFixed(0)}</span>
             )}
@@ -104,16 +122,6 @@ function ItemRow({ item }: { item: ItineraryItem }) {
           )}
           {item.description && (
             <div className="text-xs text-gray-500 mt-0.5">{item.description}</div>
-          )}
-          {item.booking_url && (
-            <a
-              href={item.booking_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-block text-xs text-blue-600 hover:text-blue-800 hover:underline mt-1"
-            >
-              📍 View on Google Maps
-            </a>
           )}
           {item.reasoning && (
             <div className="text-xs text-primary-600 mt-1 italic">Why: {item.reasoning}</div>

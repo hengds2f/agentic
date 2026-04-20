@@ -58,14 +58,13 @@ export default function App() {
           <h1 className="text-xl font-bold">HolidayPilot</h1>
         </div>
         <div className="flex items-center gap-3">
-          {tripId && (
+          {tripId && itinerary && (
             <a
-              href={getExportUrl(tripId, 'html')}
-              target="_blank"
-              rel="noopener noreferrer"
+              href={getExportUrl(tripId, 'pdf')}
+              download={`itinerary_${tripId}.pdf`}
               className="bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded text-sm transition"
             >
-              📥 Download Itinerary
+              📥 Download PDF
             </a>
           )}
         </div>

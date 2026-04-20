@@ -72,11 +72,6 @@ class PlannerAgent(BaseAgent):
         budget_match = re.search(r'\$\s*([\d,]+)', message)
         if not budget_match:
             budget_match = re.search(r'(?:budget\s*(?:is|of|:)?\s*)([\d,]+)', message, re.IGNORECASE)
-        if not budget_match:
-            # Bare number (only if message is mostly just a number)
-            bare = message.strip().replace(',', '')
-            if re.fullmatch(r'\d+(?:\.\d+)?', bare):
-                budget_match = re.fullmatch(r'([\d,]+(?:\.\d+)?)', message.strip())
         if budget_match:
             updated["budget_total"] = float(budget_match.group(1).replace(",", ""))
 
@@ -101,6 +96,13 @@ class PlannerAgent(BaseAgent):
             updated["num_children"] = int(children_match.group(1))
         if people_match and not adults_match:
             updated["num_adults"] = int(people_match.group(1))
+
+        # Bare number fallback: when message is just a small number (1-20) and
+        # num_adults hasn't been set yet, treat it as the traveler count.
+        if not updated.get("num_adults"):
+            bare = message.strip().replace(',', '')
+            if re.fullmatch(r'\d+', bare) and 1 <= int(bare) <= 20:
+                updated["num_adults"] = int(bare)
 
         # Detect "from <city>" first so we can exclude origin from destinations
         from_match = re.search(r'from\s+([a-zA-Z\s]+?)(?:\s*,|\s+to\s+|\s*$|\s+\d|\s+budget)', message, re.IGNORECASE)
@@ -165,12 +167,6 @@ class PlannerAgent(BaseAgent):
         missing = []
         for f in required:
             val = trip.get(f)
-            if f == "num_adults":
-                # num_adults defaults to 1, so it's only "missing" if never confirmed
-                # We treat it as present if it has a value >= 1
-                if not val or val < 1:
-                    missing.append(f)
-            else:
-                if not val:
-                    missing.append(f)
+            if val is None or val == "" or val == 0:
+                missing.append(f)
         return missing
