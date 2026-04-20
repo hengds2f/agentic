@@ -1,3 +1,12 @@
+---
+title: HolidayPilot
+emoji: 🌍
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+---
+
 # 🌍 HolidayPilot — AI Multi-Agent Trip Planner
 
 A production-ready agentic holiday planner that helps users plan trips end-to-end through a conversational interface and multi-agent workflow.
