@@ -145,9 +145,11 @@ class PlannerAgent(BaseAgent):
                     updated["destination"] = clean.title()
 
         # ── Bare-text fallback for origin ──
-        # If destination is already set, origin is missing, and the message is
-        # a simple place name (no special keywords), treat it as the origin.
-        if updated.get("destination") and not updated.get("origin"):
+        # If destination was already set BEFORE this message, origin is missing,
+        # and the message is a simple place name, treat it as the origin.
+        # Important: only if destination was NOT just set by this same message.
+        dest_was_already_set = bool(trip.get("destination"))
+        if dest_was_already_set and updated.get("destination") and not updated.get("origin"):
             stripped = message.strip().rstrip('.!?')
             has_budget = bool(budget_match)
             has_dates = bool(date_matches)

@@ -122,13 +122,17 @@ class CalendarAgent(BaseAgent):
         # Cluster all activities into day groups for geographic proximity
         day_groups = _cluster_activities(list(activities), num_groups)
 
-        # Ensure each group has enough activities (borrow from larger groups)
+        # Ensure each group has enough activities —
+        # borrow from larger groups, then cycle from master list
         for i, grp in enumerate(day_groups):
             while len(grp) < acts_per_day and any(len(g) > acts_per_day for g in day_groups):
                 donor = max(day_groups, key=len)
                 if len(donor) <= acts_per_day:
                     break
                 grp.append(donor.pop())
+            # If still short, cycle from the full activities list
+            while len(grp) < acts_per_day and activities:
+                grp.append(activities[len(grp) % len(activities)])
 
         days: list[DayPlan] = []
         restaurant_idx = 0
@@ -209,10 +213,10 @@ class CalendarAgent(BaseAgent):
                                      cost_multiplier=cost_multiplier)
                 day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
 
-            # ── Meals ──
-            # Lunch
-            if restaurant_idx < len(restaurants):
-                rest = restaurants[restaurant_idx]
+            # ── Meals — every day gets lunch and dinner ──
+            # Cycle through restaurants if we run out
+            if restaurants:
+                rest = restaurants[restaurant_idx % len(restaurants)]
                 lunch_time = dt_time(12, 0) if not is_first_day else dt_time(13, 0)
                 lunch_cost = 25.0 * cost_multiplier
                 items.append(ItineraryItem(
@@ -230,9 +234,7 @@ class CalendarAgent(BaseAgent):
                 day_cost += lunch_cost
                 restaurant_idx += 1
 
-            # Dinner
-            if restaurant_idx < len(restaurants):
-                rest = restaurants[restaurant_idx]
+                rest = restaurants[restaurant_idx % len(restaurants)]
                 dinner_cost = 40.0 * cost_multiplier
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
