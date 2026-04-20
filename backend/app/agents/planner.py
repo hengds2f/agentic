@@ -80,7 +80,7 @@ class PlannerAgent(BaseAgent):
                 updated["end_date"] = date_matches[0]
 
         # Detect "from <city>" first so we can exclude origin from destinations
-        from_match = re.search(r'from\s+([a-zA-Z\s]+?)(?:\s+to\s+|\s*$|,|\s+\d)', message, re.IGNORECASE)
+        from_match = re.search(r'from\s+([a-zA-Z\s]+?)(?:\s*,|\s+to\s+|\s*$|\s+\d|\s+budget)', message, re.IGNORECASE)
         if from_match:
             origin_candidate = from_match.group(1).strip()
             if len(origin_candidate) > 1:
@@ -88,24 +88,37 @@ class PlannerAgent(BaseAgent):
 
         origin_lower = updated.get("origin", "").lower()
 
-        # Detect common destinations (simple heuristic)
-        destinations = [
-            "paris", "tokyo", "london", "rome", "barcelona", "new york",
-            "bali", "sydney", "dubai", "amsterdam", "lisbon", "bangkok",
-            "singapore", "hawaii", "maldives", "iceland", "morocco",
-        ]
-        # Try "to <dest>" pattern first
-        to_match = re.search(r'(?:to|visit|go to|trip to)\s+([a-zA-Z\s]+?)(?:\s+from\s+|\s*$|,|\s+\d)', message, re.IGNORECASE)
+        # Detect destination — accept any place name, not just a hardcoded list
+        # Try explicit patterns: "visit X", "go to X", "trip to X", "fly to X", etc.
+        to_match = re.search(
+            r'(?:heading to|travel to|trip to|fly to|go to|visit)\s+([a-zA-Z\s,]+?)(?:\s+from\s+|\s*$|\s+\d|\s+budget|\s+for\s)',
+            message, re.IGNORECASE,
+        )
+        if not to_match:
+            # Fallback: bare "to X" but only when preceded by "want" or similar
+            to_match = re.search(
+                r'(?:want|like|plan|going)\s+to\s+([a-zA-Z\s,]+?)(?:\s+from\s+|\s*$|\s+\d|\s+budget|\s+for\s)',
+                message, re.IGNORECASE,
+            )
         if to_match:
-            to_candidate = to_match.group(1).strip().lower()
-            for dest in destinations:
-                if dest in to_candidate and dest != origin_lower:
-                    updated["destination"] = dest.title()
-                    break
-        else:
-            for dest in destinations:
-                if dest in msg and dest != origin_lower:
-                    updated["destination"] = dest.title()
+            dest_candidate = to_match.group(1).strip().rstrip(',')
+            if len(dest_candidate) > 1 and dest_candidate.lower() != origin_lower:
+                updated["destination"] = dest_candidate.title()
+        elif not updated.get("destination"):
+            # If no destination yet and message looks like a simple place name
+            # (no budget, no date, no keywords — just a bare destination input)
+            stripped = message.strip().rstrip('.!?')
+            has_budget = bool(budget_match)
+            has_dates = bool(date_matches)
+            has_mood = any(m in msg for m in ["relaxing", "romantic", "adventure", "family", "workation", "cultural"])
+            has_keyword = any(kw in msg for kw in ["from", "budget", "date", "origin", "traveler"])
+
+            if stripped and not has_budget and not has_dates and not has_mood and not has_keyword:
+                # Treat the whole message as a destination
+                # Remove common filler words
+                clean = re.sub(r'^(?:i\s+want\s+|i\'?d?\s+like\s+|let\'?s?\s+go\s+|how about\s+|maybe\s+)', '', stripped, flags=re.IGNORECASE).strip()
+                if clean and len(clean) > 1 and clean.lower() != origin_lower:
+                    updated["destination"] = clean.title()
 
         return updated
 
