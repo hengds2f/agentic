@@ -47,7 +47,7 @@ class PlannerAgent(BaseAgent):
                 "num_adults": "How many people are going? (e.g. 2 adults, 1 child)",
                 "budget_total": "What's your approximate budget for the trip? (e.g. 3000)",
             }
-            questions = [prompts.get(f, f"Could you tell me about {f}?") for f in missing[:2]]
+            questions = [prompts.get(f, f"Could you tell me about {f}?") for f in missing[:1]]
             reply = " ".join(questions)
 
         return {
@@ -143,6 +143,19 @@ class PlannerAgent(BaseAgent):
                 clean = re.sub(r'^(?:i\s+want\s+|i\'?d?\s+like\s+|let\'?s?\s+go\s+|how about\s+|maybe\s+)', '', stripped, flags=re.IGNORECASE).strip()
                 if clean and len(clean) > 1 and clean.lower() != origin_lower:
                     updated["destination"] = clean.title()
+
+        # ── Bare-text fallback for origin ──
+        # If destination is already set, origin is missing, and the message is
+        # a simple place name (no special keywords), treat it as the origin.
+        if updated.get("destination") and not updated.get("origin"):
+            stripped = message.strip().rstrip('.!?')
+            has_budget = bool(budget_match)
+            has_dates = bool(date_matches)
+            has_keyword = any(kw in msg for kw in ["budget", "date", "traveler", "adult", "child", "people"])
+            if stripped and not has_budget and not has_dates and not has_keyword:
+                clean = re.sub(r'^(?:from\s+)', '', stripped, flags=re.IGNORECASE).strip()
+                if clean and len(clean) > 1:
+                    updated["origin"] = clean.title()
 
         return updated
 
