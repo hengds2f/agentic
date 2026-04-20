@@ -1,8 +1,7 @@
 import { useRef, useEffect } from 'react';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import type { Itinerary } from '../types';
-
-/* Leaflet is loaded via CDN in index.html */
-declare const L: any;
 
 interface Props {
   itinerary: Itinerary;
@@ -10,10 +9,10 @@ interface Props {
 
 export default function MapView({ itinerary }: Props) {
   const mapRef = useRef<HTMLDivElement>(null);
-  const mapInstance = useRef<any>(null);
+  const mapInstance = useRef<L.Map | null>(null);
 
   useEffect(() => {
-    if (!mapRef.current || typeof L === 'undefined') return;
+    if (!mapRef.current) return;
 
     // Clean up previous map
     if (mapInstance.current) {
@@ -21,10 +20,10 @@ export default function MapView({ itinerary }: Props) {
       mapInstance.current = null;
     }
 
-    // Collect city waypoints from the itinerary
+    // Collect city waypoints
     const cities = itinerary.cities || [];
 
-    // Also collect all item coordinates as fallback
+    // Collect all item coordinates
     const allCoords: [number, number][] = [];
     itinerary.days.forEach(day => {
       day.items.forEach(item => {
@@ -34,24 +33,28 @@ export default function MapView({ itinerary }: Props) {
       });
     });
 
-    // If we have city waypoints, use those; otherwise use item coords
+    // Build waypoints from cities or from per-day item coords
     const waypoints: { name: string; lat: number; lon: number; dayLabel: string }[] = [];
 
     if (cities.length > 0) {
       cities.forEach((city, i) => {
-        waypoints.push({ name: city.name, lat: city.lat, lon: city.lon, dayLabel: `Stop ${i + 1}` });
+        if (city.lat && city.lon) {
+          waypoints.push({ name: city.name, lat: city.lat, lon: city.lon, dayLabel: `Stop ${i + 1}` });
+        }
       });
-    } else {
-      // Group first coord per day
-      const seenCities = new Set<string>();
+    }
+
+    if (waypoints.length === 0) {
+      // Fallback: use first coord from each day
+      const seenKeys = new Set<string>();
       itinerary.days.forEach(day => {
         const item = day.items.find(
           i => i.latitude && i.longitude && i.latitude !== 0 && i.longitude !== 0
         );
         if (item) {
           const key = `${item.latitude.toFixed(2)},${item.longitude.toFixed(2)}`;
-          if (!seenCities.has(key)) {
-            seenCities.add(key);
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
             waypoints.push({
               name: item.location || day.title,
               lat: item.latitude,
@@ -63,12 +66,13 @@ export default function MapView({ itinerary }: Props) {
       });
     }
 
-    if (waypoints.length === 0 && allCoords.length === 0) return;
-
-    const center: [number, number] =
-      waypoints.length > 0
-        ? [waypoints[0].lat, waypoints[0].lon]
-        : allCoords[0];
+    // Determine center
+    let center: [number, number] = [35.68, 139.69]; // default Tokyo
+    if (waypoints.length > 0) {
+      center = [waypoints[0].lat, waypoints[0].lon];
+    } else if (allCoords.length > 0) {
+      center = allCoords[0];
+    }
 
     const map = L.map(mapRef.current).setView(center, 6);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -76,12 +80,12 @@ export default function MapView({ itinerary }: Props) {
       maxZoom: 18,
     }).addTo(map);
 
-    const bounds: [number, number][] = [];
+    const boundsArr: [number, number][] = [];
 
-    // Add numbered markers for each city
+    // Add numbered markers
     waypoints.forEach((wp, idx) => {
       const icon = L.divIcon({
-        className: 'custom-marker',
+        className: '',
         html: `<div style="
           background: #2563eb;
           color: white;
@@ -104,12 +108,12 @@ export default function MapView({ itinerary }: Props) {
         .addTo(map)
         .bindPopup(`<b>${wp.dayLabel}</b><br>${wp.name}`);
 
-      bounds.push([wp.lat, wp.lon]);
+      boundsArr.push([wp.lat, wp.lon]);
     });
 
-    // Draw route polyline between waypoints
-    if (bounds.length > 1) {
-      L.polyline(bounds, {
+    // Draw route polyline
+    if (boundsArr.length > 1) {
+      L.polyline(boundsArr, {
         color: '#2563eb',
         weight: 3,
         opacity: 0.7,
@@ -117,7 +121,7 @@ export default function MapView({ itinerary }: Props) {
       }).addTo(map);
     }
 
-    // Also add small dots for individual POIs
+    // Add small dots for individual POIs
     allCoords.forEach(coord => {
       L.circleMarker(coord, {
         radius: 4,
@@ -128,11 +132,16 @@ export default function MapView({ itinerary }: Props) {
       }).addTo(map);
     });
 
-    // Fit map to all markers
-    const allBounds = [...bounds, ...allCoords];
+    // Fit bounds
+    const allBounds = [...boundsArr, ...allCoords];
     if (allBounds.length > 1) {
-      map.fitBounds(allBounds, { padding: [40, 40] });
+      map.fitBounds(allBounds as L.LatLngBoundsExpression, { padding: [40, 40] });
+    } else if (allBounds.length === 1) {
+      map.setView(allBounds[0], 11);
     }
+
+    // Force a size recalc after render
+    setTimeout(() => map.invalidateSize(), 100);
 
     mapInstance.current = map;
 
