@@ -35,8 +35,8 @@ class PlannerAgent(BaseAgent):
             reply = (
                 f"Great! I have everything I need to plan your trip to **{updated_trip.get('destination', '')}** "
                 f"from {updated_trip.get('start_date', '?')} to {updated_trip.get('end_date', '?')}. "
-                f"Travelers: {pax}. Budget: ${updated_trip.get('budget_total', 0):,.0f}. "
-                f"Let me search for the best options now..."
+                f"Travelers: {pax}. "
+                f"Let me search for the best options and show you the cost breakdown..."
             )
         else:
             prompts = {
@@ -45,7 +45,6 @@ class PlannerAgent(BaseAgent):
                 "start_date": "What are your travel dates? (start date)",
                 "end_date": "And your return date?",
                 "num_adults": "How many people are going? (e.g. 2 adults, 1 child)",
-                "budget_total": "What's your approximate budget for the trip? (e.g. 3000)",
             }
             questions = [prompts.get(f, f"Could you tell me about {f}?") for f in missing[:1]]
             reply = " ".join(questions)
@@ -162,7 +161,7 @@ class PlannerAgent(BaseAgent):
         return updated
 
     def _check_missing(self, trip: dict) -> list[str]:
-        required = ["destination", "origin", "start_date", "end_date", "budget_total", "num_adults"]
+        required = ["destination", "origin", "start_date", "end_date", "num_adults"]
         missing = []
         for f in required:
             val = trip.get(f)

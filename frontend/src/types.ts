@@ -58,6 +58,7 @@ export interface ItineraryItem {
   location: string;
   cost: number;
   currency: string;
+  booking_url: string;
   reasoning: string;
   weather_note: string;
   confirmed: boolean;

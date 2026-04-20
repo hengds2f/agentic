@@ -107,7 +107,7 @@ export default function App() {
           <div className="flex-1 overflow-y-auto p-6">
             {activeTab === 'itinerary' && (
               itinerary ? (
-                <ItineraryView itinerary={itinerary} tripId={tripId} />
+                <ItineraryView itinerary={itinerary} tripId={tripId} onItineraryUpdated={setItinerary} />
               ) : (
                 <EmptyState icon="📅" text="Your itinerary will appear here after planning" />
               )

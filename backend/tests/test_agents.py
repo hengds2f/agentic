@@ -21,13 +21,12 @@ from app.models.schemas import AgentRole, TripRequest, ChatMessage
 async def test_planner_extracts_destination():
     agent = PlannerAgent()
     ctx = {
-        "trip": {"trip_id": "t1", "destination": "", "budget_total": None},
-        "user_message": "I want to visit Paris from New York, budget $3000",
+        "trip": {"trip_id": "t1", "destination": ""},
+        "user_message": "I want to visit Paris from New York",
         "history": [],
     }
     result = await agent.run(ctx)
     assert result["updated_trip"]["destination"] == "Paris"
-    assert result["updated_trip"]["budget_total"] == 3000.0
     assert "origin" in result["updated_trip"]
 
 
@@ -54,7 +53,6 @@ async def test_planner_ready_when_complete():
             "origin": "London",
             "start_date": "2026-07-01",
             "end_date": "2026-07-05",
-            "budget_total": 3000,
             "num_adults": 2,
             "num_children": 0,
         },

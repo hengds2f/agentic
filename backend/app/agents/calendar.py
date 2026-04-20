@@ -229,6 +229,9 @@ class CalendarAgent(BaseAgent):
                     description=f"{rest.get('cuisine', '')} cuisine — ⭐ {rest.get('rating', 4.0)}",
                     cost=lunch_cost,
                     location=rest.get("address", ""),
+                    latitude=rest.get("latitude", 0.0),
+                    longitude=rest.get("longitude", 0.0),
+                    booking_url=rest.get("booking_url", ""),
                     reasoning=f"Highly rated {rest.get('cuisine', 'local')} restaurant — see Google reviews",
                 ))
                 day_cost += lunch_cost
@@ -246,6 +249,9 @@ class CalendarAgent(BaseAgent):
                     description=f"{rest.get('cuisine', '')} cuisine — ⭐ {rest.get('rating', 4.0)}",
                     cost=dinner_cost,
                     location=rest.get("address", ""),
+                    latitude=rest.get("latitude", 0.0),
+                    longitude=rest.get("longitude", 0.0),
+                    booking_url=rest.get("booking_url", ""),
                     reasoning="Top-rated dinner spot — check Google Maps for reviews and photos",
                 ))
                 day_cost += dinner_cost
@@ -360,6 +366,9 @@ class CalendarAgent(BaseAgent):
                 description=chosen.get("description", ""),
                 cost=chosen.get("price", 0) * cost_multiplier,
                 location=chosen.get("address", ""),
+                latitude=chosen.get("latitude", 0.0),
+                longitude=chosen.get("longitude", 0.0),
+                booking_url=chosen.get("booking_url", ""),
                 reasoning=f"Top-rated {chosen.get('category', 'attraction')} in {trip.get('destination', 'the area')}",
                 weather_note=weather_note,
                 backup=backup_item,

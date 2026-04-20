@@ -4,6 +4,7 @@ import { optimizeDay } from '../api';
 interface Props {
   itinerary: Itinerary;
   tripId: string;
+  onItineraryUpdated: (itinerary: Itinerary) => void;
 }
 
 const categoryIcons: Record<string, string> = {
@@ -14,10 +15,13 @@ const categoryIcons: Record<string, string> = {
   transport: '🚗',
 };
 
-export default function ItineraryView({ itinerary, tripId }: Props) {
+export default function ItineraryView({ itinerary, tripId, onItineraryUpdated }: Props) {
   const handleRegenerate = async (day: number) => {
     try {
-      await optimizeDay(tripId, day);
+      const res = await optimizeDay(tripId, day);
+      if (res.itinerary) {
+        onItineraryUpdated(res.itinerary);
+      }
     } catch {
       // handle error
     }
@@ -100,6 +104,16 @@ function ItemRow({ item }: { item: ItineraryItem }) {
           )}
           {item.description && (
             <div className="text-xs text-gray-500 mt-0.5">{item.description}</div>
+          )}
+          {item.booking_url && (
+            <a
+              href={item.booking_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block text-xs text-blue-600 hover:text-blue-800 hover:underline mt-1"
+            >
+              📍 View on Google Maps
+            </a>
           )}
           {item.reasoning && (
             <div className="text-xs text-primary-600 mt-1 italic">Why: {item.reasoning}</div>
