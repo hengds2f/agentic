@@ -17,14 +17,18 @@ const categoryIcons: Record<string, string> = {
 };
 
 export default function ItineraryView({ itinerary, tripId, onItineraryUpdated }: Props) {
+  const [error, setError] = useState('');
+
   const handleRegenerate = async (day: number) => {
+    setError('');
     try {
       const res = await optimizeDay(tripId, day);
       if (res.itinerary) {
         onItineraryUpdated(res.itinerary);
       }
-    } catch {
-      // handle error
+    } catch (err) {
+      console.error('Regenerate failed:', err);
+      setError(`Failed to regenerate Day ${day}. Please try again.`);
     }
   };
 
@@ -50,6 +54,11 @@ export default function ItineraryView({ itinerary, tripId, onItineraryUpdated }:
       </div>
 
       {/* Day plans */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700 text-sm">
+          {error}
+        </div>
+      )}
       {itinerary.days.map(day => (
         <DayCard key={day.day} day={day} onRegenerate={() => handleRegenerate(day.day)} />
       ))}

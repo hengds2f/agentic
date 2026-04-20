@@ -17,8 +17,15 @@ class RouteAgent(BaseAgent):
         from app.services.maps import MapsService
 
         gathered = context.get("gathered", {})
-        activities = gathered.get("activities", {}).get("activities", [])
-        restaurants = gathered.get("food", {}).get("restaurants", [])
+        # During regeneration, data is at top-level keys instead of "gathered"
+        activities = (
+            gathered.get("activities", {}).get("activities", [])
+            or context.get("activities", {}).get("activities", [])
+        )
+        restaurants = (
+            gathered.get("food", {}).get("restaurants", [])
+            or context.get("food", {}).get("restaurants", [])
+        )
 
         service = MapsService()
 

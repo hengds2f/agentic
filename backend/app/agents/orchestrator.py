@@ -131,8 +131,9 @@ class Orchestrator:
 
         if budget_data:
             summary_parts.append(f"**Estimated total: ${budget_data.get('total_estimated', 0):,.0f} {budget_data.get('currency', 'USD')}**")
-            if not budget_data.get("within_budget", True):
-                summary_parts.append("⚠️ This exceeds your budget. See savings tips below.")
+            per_person = budget_data.get('cost_per_person', 0)
+            if per_person:
+                summary_parts.append(f"That's about **${per_person:,.0f} per person**.")
 
         return "\n".join(summary_parts), steps, itinerary_data, budget_data
 

@@ -16,7 +16,10 @@ class BudgetAgent(BaseAgent):
     async def run(self, context: dict[str, Any]) -> dict[str, Any]:
         trip = context["trip"]
         gathered = context.get("gathered", {})
-        total_budget = trip.get("budget_total", 0) or 5000
+
+        num_adults = trip.get("num_adults", 1) or 1
+        num_children = trip.get("num_children", 0) or 0
+        num_travelers = num_adults + num_children
 
         # Calculate costs per category
         flights = gathered.get("flights", {}).get("flights", [])
@@ -38,38 +41,43 @@ class BudgetAgent(BaseAgent):
             except (ValueError, TypeError):
                 pass
 
+        # Cost multiplier: adults full price, children half price
+        cost_multiplier = num_adults + num_children * 0.5
+
+        flight_total = cheapest_flight * cost_multiplier
         hotel_total = cheapest_hotel * num_nights
-        activity_total = sum(a.get("price", 0) for a in activities[:num_nights * 2])
+        activity_total = sum(a.get("price", 0) for a in activities[:num_nights * 2]) * cost_multiplier
         food_daily = 60  # estimate per person per day
-        food_total = food_daily * num_nights * max(len(trip.get("travelers", [])), 1)
+        food_total = food_daily * num_nights * cost_multiplier
         transport_est = 30 * num_nights
 
-        total_estimated = cheapest_flight + hotel_total + activity_total + food_total + transport_est
+        total_estimated = flight_total + hotel_total + activity_total + food_total + transport_est
+        cost_per_person = total_estimated / max(num_travelers, 1)
 
         categories = [
-            BudgetCategory(category="Flights", allocated=cheapest_flight, spent=0, items=["Round trip"]),
+            BudgetCategory(category="Flights", allocated=flight_total, spent=0, items=["Round trip"]),
             BudgetCategory(category="Accommodation", allocated=hotel_total, spent=0, items=[f"{num_nights} nights"]),
             BudgetCategory(category="Activities", allocated=activity_total, spent=0),
             BudgetCategory(category="Food", allocated=food_total, spent=0),
             BudgetCategory(category="Transport", allocated=transport_est, spent=0),
         ]
 
-        savings = []
-        if total_estimated > total_budget:
-            savings.append("Consider budget hotels or hostels")
-            savings.append("Look for free walking tours and parks")
-            savings.append("Cook some meals instead of eating out")
+        savings = [
+            "Consider free walking tours and parks",
+            "Look for accommodation with kitchen facilities",
+            "Use public transport instead of taxis",
+        ]
 
         breakdown = BudgetBreakdown(
-            total_budget=total_budget,
             total_estimated=total_estimated,
+            cost_per_person=cost_per_person,
+            num_travelers=num_travelers,
             currency=trip.get("budget_currency", "USD"),
             categories=categories,
-            within_budget=total_estimated <= total_budget,
             savings_tips=savings,
         )
 
         return {
             "breakdown": breakdown.model_dump(),
-            "summary": f"Estimated ${total_estimated:,.0f} of ${total_budget:,.0f} budget",
+            "summary": f"Estimated ${total_estimated:,.0f} total (${cost_per_person:,.0f}/person)",
         }

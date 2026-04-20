@@ -198,8 +198,10 @@ class BudgetCategory(BaseModel):
 
 
 class BudgetBreakdown(BaseModel):
-    total_budget: float
+    total_budget: float = 0.0
     total_estimated: float
+    cost_per_person: float = 0.0
+    num_travelers: int = 1
     currency: str = "USD"
     categories: list[BudgetCategory] = []
     within_budget: bool = True

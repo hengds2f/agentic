@@ -119,7 +119,47 @@ export default function App() {
               )
             )}
             {activeTab === 'weather' && (
-              <EmptyState icon="🌤️" text="Weather forecasts will appear after planning" />
+              itinerary && itinerary.days.some(d => d.weather) ? (
+                <div className="space-y-4">
+                  <h3 className="font-semibold text-lg">🌤️ Weather Forecast</h3>
+                  <div className="grid gap-4">
+                    {itinerary.days.map(day => day.weather && (
+                      <div key={day.day} className="bg-white border border-gray-200 rounded-xl p-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="font-medium">Day {day.day} — {day.date}</h4>
+                          <span className="text-2xl">
+                            {day.weather.condition === 'sunny' ? '☀️' :
+                             day.weather.condition === 'cloudy' ? '☁️' :
+                             day.weather.condition === 'rainy' ? '🌧️' :
+                             day.weather.condition === 'stormy' ? '⛈️' : '🌤️'}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-3 text-sm">
+                          <div>
+                            <div className="text-gray-500">Condition</div>
+                            <div className="font-medium capitalize">{day.weather.condition}</div>
+                          </div>
+                          <div>
+                            <div className="text-gray-500">Temperature</div>
+                            <div className="font-medium">{day.weather.high_temp_c}° / {day.weather.low_temp_c}°C</div>
+                          </div>
+                          <div>
+                            <div className="text-gray-500">Rain</div>
+                            <div className="font-medium">{day.weather.precipitation_pct}%</div>
+                          </div>
+                        </div>
+                        {day.weather.recommendation && (
+                          <div className="mt-2 text-xs text-amber-700 bg-amber-50 rounded px-2 py-1">
+                            💡 {day.weather.recommendation}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <EmptyState icon="🌤️" text="Weather forecasts will appear after planning" />
+              )
             )}
             {activeTab === 'checklist' && (
               itinerary ? (

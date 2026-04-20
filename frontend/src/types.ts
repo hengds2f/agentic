@@ -104,6 +104,8 @@ export interface BudgetCategory {
 export interface BudgetBreakdown {
   total_budget: number;
   total_estimated: number;
+  cost_per_person: number;
+  num_travelers: number;
   currency: string;
   categories: BudgetCategory[];
   within_budget: boolean;

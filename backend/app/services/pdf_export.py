@@ -35,7 +35,7 @@ ITINERARY_HTML_TEMPLATE = """
 <body>
 <h1>🌍 {{ destination }} Trip Itinerary</h1>
 <p><strong>Dates:</strong> {{ start_date }} — {{ end_date }} |
-   <strong>Budget:</strong> {{ currency }} {{ "%.0f"|format(total_cost) }} |
+   <strong>Estimated Cost:</strong> {{ currency }} {{ "%.0f"|format(total_cost) }} ({{ currency }} {{ "%.0f"|format(cost_per_person) }}/person) |
    <strong>Travelers:</strong> {{ traveler_count }}</p>
 
 {% for day in days %}
@@ -46,7 +46,7 @@ ITINERARY_HTML_TEMPLATE = """
     <div class="weather">{{ day.weather.condition | capitalize }} · {{ day.weather.high_temp_c }}°C / {{ day.weather.low_temp_c }}°C · {{ day.weather.recommendation }}</div>
     {% endif %}
   </div>
-  {% for item in day.items %}
+  {% for item in day['items'] %}
   <div class="item {{ item.category }}">
     <span class="time">{% if item.start_time %}{{ item.start_time }}{% endif %}</span>
     {{ item.title }}
@@ -91,14 +91,20 @@ ITINERARY_HTML_TEMPLATE = """
 
 def render_itinerary_html(itinerary: dict, trip: dict) -> str:
     template = Template(ITINERARY_HTML_TEMPLATE)
+    total_cost = itinerary.get("total_cost", 0) or 0
+    num_adults = trip.get("num_adults", 1) or 1
+    num_children = trip.get("num_children", 0) or 0
+    traveler_count = num_adults + num_children
+    cost_per_person = total_cost / max(traveler_count, 1)
     return template.render(
         destination=trip.get("destination", "Your Trip"),
         start_date=trip.get("start_date", ""),
         end_date=trip.get("end_date", ""),
         currency=itinerary.get("currency", "USD"),
-        total_cost=itinerary.get("total_cost", 0),
-        flexibility_score=itinerary.get("flexibility_score", 0),
-        traveler_count=len(trip.get("travelers", [])) or 1,
+        total_cost=total_cost,
+        cost_per_person=cost_per_person,
+        flexibility_score=itinerary.get("flexibility_score", 0) or 0,
+        traveler_count=traveler_count,
         days=itinerary.get("days", []),
         packing_list=itinerary.get("packing_list", []),
         checklist=itinerary.get("checklist", []),
