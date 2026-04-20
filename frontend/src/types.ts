@@ -56,6 +56,8 @@ export interface ItineraryItem {
   category: string;
   description: string;
   location: string;
+  latitude: number;
+  longitude: number;
   cost: number;
   currency: string;
   booking_url: string;
@@ -83,6 +85,12 @@ export interface DayPlan {
   daily_spend: number;
 }
 
+export interface CityWaypoint {
+  name: string;
+  lat: number;
+  lon: number;
+}
+
 export interface Itinerary {
   trip_id: string;
   days: DayPlan[];
@@ -92,6 +100,8 @@ export interface Itinerary {
   travel_time_hours: number;
   packing_list: string[];
   checklist: string[];
+  map_url: string;
+  cities: CityWaypoint[];
 }
 
 export interface BudgetCategory {

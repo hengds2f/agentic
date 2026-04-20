@@ -79,6 +79,21 @@ class Orchestrator:
         ctx = {"trip": trip.model_dump()}
         steps: list[ReasoningStep] = []
 
+        # Phase 0: Discover cities within the destination
+        from app.services.cities import find_cities
+
+        try:
+            start_d = trip.start_date
+            end_d = trip.end_date
+            num_days = max((end_d - start_d).days, 1) if start_d and end_d else 3
+        except (ValueError, TypeError):
+            num_days = 3
+        num_cities = max(min(num_days // 2, 6), 2)
+        cities = await find_cities(trip.destination, num_cities)
+        ctx["cities"] = cities
+        logger.info("orchestrator.cities", count=len(cities),
+                     names=[c["name"] for c in cities], trace_id=trace_id)
+
         # Phase 1: parallel data gathering
         gather_roles = [
             AgentRole.flights,

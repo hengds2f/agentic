@@ -127,7 +127,10 @@ function ItemRow({ item }: { item: ItineraryItem }) {
             )}
           </div>
           {item.start_time && (
-            <div className="text-xs text-gray-400">{item.start_time} — {item.end_time}</div>
+            <div className="text-xs text-gray-400">
+              {item.start_time} — {item.end_time}
+              {item.location && <span className="ml-2 text-gray-500">📍 {item.location}</span>}
+            </div>
           )}
           {item.description && (
             <div className="text-xs text-gray-500 mt-0.5">{item.description}</div>

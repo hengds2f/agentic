@@ -5,9 +5,10 @@ import ChatPanel from './components/ChatPanel';
 import TripSidebar from './components/TripSidebar';
 import ItineraryView from './components/ItineraryView';
 import BudgetView from './components/BudgetView';
+import MapView from './components/MapView';
 import ReasoningSteps from './components/ReasoningSteps';
 
-type Tab = 'itinerary' | 'budget' | 'weather' | 'checklist';
+type Tab = 'itinerary' | 'map' | 'budget' | 'weather' | 'checklist';
 
 export default function App() {
   const [tripId, setTripId] = useState('');
@@ -44,6 +45,7 @@ export default function App() {
 
   const tabs: { key: Tab; label: string }[] = [
     { key: 'itinerary', label: '📅 Itinerary' },
+    { key: 'map', label: '🗺️ Map' },
     { key: 'budget', label: '💰 Budget' },
     { key: 'weather', label: '🌤️ Weather' },
     { key: 'checklist', label: '✅ Checklist' },
@@ -109,6 +111,13 @@ export default function App() {
                 <ItineraryView itinerary={itinerary} tripId={tripId} onItineraryUpdated={setItinerary} />
               ) : (
                 <EmptyState icon="📅" text="Your itinerary will appear here after planning" />
+              )
+            )}
+            {activeTab === 'map' && (
+              itinerary ? (
+                <MapView itinerary={itinerary} />
+              ) : (
+                <EmptyState icon="🗺️" text="Route map will appear after planning" />
               )
             )}
             {activeTab === 'budget' && (

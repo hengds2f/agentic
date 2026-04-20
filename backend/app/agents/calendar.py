@@ -5,6 +5,7 @@ import uuid
 from datetime import date as dt_date, datetime, time as dt_time, timedelta
 from math import atan2, cos, radians, sin, sqrt
 from typing import Any
+from urllib.parse import quote
 
 from app.agents.base import BaseAgent
 from app.models.schemas import AgentRole, DayPlan, Itinerary, ItineraryItem, WeatherForecast
@@ -19,52 +20,77 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * atan2(sqrt(a), sqrt(1 - a))
 
 
+def _order_cities_nearest(cities: list[dict]) -> list[dict]:
+    """Order cities using nearest-neighbor for a touring route."""
+    if len(cities) <= 1:
+        return list(cities)
+    ordered = [cities[0]]
+    remaining = list(cities[1:])
+    while remaining:
+        last = ordered[-1]
+        nearest = min(remaining, key=lambda c: _haversine(
+            last.get("lat", 0), last.get("lon", 0),
+            c.get("lat", 0), c.get("lon", 0),
+        ))
+        ordered.append(nearest)
+        remaining.remove(nearest)
+    return ordered
+
+
+def _allocate_days(num_days: int, num_cities: int) -> list[int]:
+    """Distribute trip days across cities."""
+    if num_cities <= 0:
+        return []
+    if num_cities == 1:
+        return [num_days]
+    base = max(num_days // num_cities, 1)
+    allocation = [base] * num_cities
+    remainder = num_days - sum(allocation)
+    for i in range(max(remainder, 0)):
+        allocation[i % num_cities] += 1
+    return allocation
+
+
+def _build_city_schedule(num_days: int, cities: list[dict]) -> list[dict]:
+    """Return a list of length num_days, each element being the city dict for that day."""
+    if not cities:
+        return [{"name": "the destination", "lat": 0, "lon": 0}] * num_days
+    ordered = _order_cities_nearest(cities)
+    alloc = _allocate_days(num_days, len(ordered))
+    schedule: list[dict] = []
+    for city, days in zip(ordered, alloc):
+        schedule.extend([city] * days)
+    # Pad if needed
+    while len(schedule) < num_days:
+        schedule.append(ordered[-1])
+    return schedule[:num_days]
+
+
+def _build_maps_url(cities: list[dict], destination: str) -> str:
+    """Build a Google Maps directions URL through all cities."""
+    if not cities or len(cities) < 2:
+        return f"https://www.google.com/maps/search/{quote(destination)}"
+    parts = "/".join(quote(f"{c['name']}, {destination}") for c in cities)
+    return f"https://www.google.com/maps/dir/{parts}/"
+
+
 def _cluster_activities(activities: list[dict], num_groups: int) -> list[list[dict]]:
     """Simple geographic clustering: sort by distance from centroid, split into groups."""
     if not activities:
         return [[] for _ in range(num_groups)]
 
-    # Calculate centroid
     avg_lat = sum(a.get("latitude", 0) for a in activities) / len(activities)
     avg_lon = sum(a.get("longitude", 0) for a in activities) / len(activities)
 
-    # Sort by angle from centroid to group nearby POIs together
     from math import atan2 as _atan2
     for a in activities:
         a["_angle"] = _atan2(a.get("latitude", 0) - avg_lat, a.get("longitude", 0) - avg_lon)
     sorted_acts = sorted(activities, key=lambda a: a["_angle"])
 
-    # Split into roughly equal groups
     groups: list[list[dict]] = [[] for _ in range(num_groups)]
     for i, act in enumerate(sorted_acts):
         groups[i % num_groups].append(act)
     return groups
-
-
-def _day_theme(activities: list[dict]) -> str:
-    """Generate a thematic day title from the activities planned."""
-    if not activities:
-        return "Free Exploration"
-    categories = [a.get("category", "") for a in activities]
-    names = [a.get("name", "") for a in activities]
-
-    # Use primary activity name for the title
-    primary = names[0] if names else "Exploration"
-    if len(names) > 1:
-        return f"{primary} & Nearby Sights"
-
-    cat_labels = {
-        "museum": "Museum & Culture",
-        "historic": "Historic Sites",
-        "nature": "Nature & Parks",
-        "sightseeing": "Sightseeing",
-        "entertainment": "Entertainment",
-        "cultural": "Cultural Discovery",
-        "sports": "Sports & Recreation",
-        "shopping": "Shopping & Markets",
-    }
-    main_cat = max(set(categories), key=categories.count) if categories else ""
-    return cat_labels.get(main_cat, primary)
 
 
 class CalendarAgent(BaseAgent):
@@ -82,6 +108,7 @@ class CalendarAgent(BaseAgent):
             return await self._regenerate_single_day(context, regen_day)
 
         gathered = context.get("gathered", {})
+        cities = context.get("cities", [])
 
         flights = gathered.get("flights", {}).get("flights", [])
         hotels = gathered.get("hotels", {}).get("hotels", [])
@@ -106,57 +133,60 @@ class CalendarAgent(BaseAgent):
         total_pax = num_adults + num_children
         cost_multiplier = num_adults + num_children * 0.5
 
-        # Select best-rated hotel (highest rating, not cheapest)
-        best_hotel = max(hotels, key=lambda h: h.get("rating", 0)) if hotels else None
+        # ── Build city schedule: assign a city to each day ──
+        city_schedule = _build_city_schedule(num_days, cities)
+
+        # ── Group activities, restaurants, hotels by city ──
+        def _group_by_city(items: list[dict]) -> dict[str, list[dict]]:
+            groups: dict[str, list[dict]] = {}
+            for item in items:
+                city = item.get("_city", destination)
+                groups.setdefault(city, []).append(item)
+            return groups
+
+        acts_by_city = _group_by_city(activities)
+        rests_by_city = _group_by_city(restaurants)
+        hotels_by_city = _group_by_city(hotels)
+
+        # For each city, pick the best hotel (highest rating)
+        best_hotel_per_city: dict[str, dict] = {}
+        for city_name, city_hotels in hotels_by_city.items():
+            if city_hotels:
+                best_hotel_per_city[city_name] = max(city_hotels, key=lambda h: h.get("rating", 0))
+        # Global fallback hotel
+        fallback_hotel = max(hotels, key=lambda h: h.get("rating", 0)) if hotels else None
+
+        # Per-city activity index trackers
+        city_act_idx: dict[str, int] = {}
+        city_rest_idx: dict[str, int] = {}
 
         # Build forecast lookup
         forecast_map: dict[str, dict] = {}
         for f in forecasts:
             forecast_map[str(f.get("date", ""))] = f
 
-        # ── Determine flight arrival time for realistic Day 1 scheduling ──
+        # ── Flight arrival time for Day 1 scheduling ──
         best_flight = min(flights, key=lambda f: f["price"]) if flights else None
-        # Parse the arrival time to know when the traveler lands
-        arrival_hour = 12  # default noon if no flight info
-        arrival_minute = 0
+        arrival_hour, arrival_minute = 12, 0
         if best_flight:
             arr_time_str = best_flight.get("arrival_time", "")
             try:
                 if isinstance(arr_time_str, str) and "T" in arr_time_str:
                     arr_dt = datetime.fromisoformat(arr_time_str)
-                    arrival_hour = arr_dt.hour
-                    arrival_minute = arr_dt.minute
+                    arrival_hour, arrival_minute = arr_dt.hour, arr_dt.minute
                 elif hasattr(arr_time_str, "hour"):
-                    arrival_hour = arr_time_str.hour
-                    arrival_minute = arr_time_str.minute
+                    arrival_hour, arrival_minute = arr_time_str.hour, arr_time_str.minute
             except (ValueError, TypeError):
                 pass
 
-        # Add ~1hr for immigration/baggage, round up
-        post_arrival_hour = arrival_hour + 1
+        post_arrival_hour = min(arrival_hour + 1, 23)
         post_arrival_minute = arrival_minute
-        if post_arrival_hour >= 24:
-            post_arrival_hour = 23
-            post_arrival_minute = 0
 
-        # ── Cluster activities geographically into day groups ──
+        # ── Build day-by-day itinerary ──
         indoor_acts = [a for a in activities if not a.get("weather_sensitive", False)]
-        acts_per_day = 3
-        num_groups = max(num_days, 1)
-        day_groups = _cluster_activities(list(activities), num_groups)
-
-        for i, grp in enumerate(day_groups):
-            while len(grp) < acts_per_day and any(len(g) > acts_per_day for g in day_groups):
-                donor = max(day_groups, key=len)
-                if len(donor) <= acts_per_day:
-                    break
-                grp.append(donor.pop())
-            while len(grp) < acts_per_day and activities:
-                grp.append(activities[len(grp) % len(activities)])
-
         days: list[DayPlan] = []
-        restaurant_idx = 0
         total_cost = 0.0
+        ordered_cities = _order_cities_nearest(cities) if cities else []
 
         for day_num in range(num_days):
             current_date = start_date + timedelta(days=day_num)
@@ -169,28 +199,33 @@ class CalendarAgent(BaseAgent):
             is_first_day = day_num == 0
             is_last_day = day_num == num_days - 1
 
+            # Current city for this day
+            day_city = city_schedule[day_num]
+            day_city_name = day_city.get("name", destination)
+            prev_city = city_schedule[day_num - 1] if day_num > 0 else None
+            city_changed = prev_city and prev_city.get("name") != day_city_name
+
+            # Get activities/restaurants for this city
+            city_acts = acts_by_city.get(day_city_name, activities)
+            city_rests = rests_by_city.get(day_city_name, restaurants)
+            best_hotel = best_hotel_per_city.get(day_city_name, fallback_hotel)
+
+            act_idx = city_act_idx.get(day_city_name, 0)
+            rest_idx = city_rest_idx.get(day_city_name, 0)
+
             # ── Day 1: Arrival flights ──
             if is_first_day and best_flight:
                 flight_cost = best_flight.get("price", 0) * cost_multiplier
                 flight_legs = best_flight.get("legs", [])
 
                 if flight_legs:
-                    # Show each leg as a separate itinerary item
                     for leg_idx, leg in enumerate(flight_legs):
                         leg_dep = leg.get("departure_time", "")
                         leg_arr = leg.get("arrival_time", "")
                         leg_airline = leg.get("airline", best_flight.get("airline", "Airline"))
-
-                        # Parse leg times
                         try:
-                            if isinstance(leg_dep, str) and "T" in leg_dep:
-                                dep_dt = datetime.fromisoformat(leg_dep)
-                            else:
-                                dep_dt = datetime.combine(current_date, dt_time(8, 0))
-                            if isinstance(leg_arr, str) and "T" in leg_arr:
-                                arr_dt = datetime.fromisoformat(leg_arr)
-                            else:
-                                arr_dt = dep_dt + timedelta(hours=3)
+                            dep_dt = datetime.fromisoformat(leg_dep) if isinstance(leg_dep, str) and "T" in leg_dep else datetime.combine(current_date, dt_time(8, 0))
+                            arr_dt = datetime.fromisoformat(leg_arr) if isinstance(leg_arr, str) and "T" in leg_arr else dep_dt + timedelta(hours=3)
                         except (ValueError, TypeError):
                             dep_dt = datetime.combine(current_date, dt_time(8, 0))
                             arr_dt = dep_dt + timedelta(hours=3)
@@ -211,6 +246,7 @@ class CalendarAgent(BaseAgent):
                                 f"{leg.get('duration_minutes', 0) // 60}h{leg.get('duration_minutes', 0) % 60:02d}m"
                                 + (f" ({total_pax} pax)" if is_last_leg else "")
                             ),
+                            location=leg_to,
                             cost=flight_cost if is_last_leg else 0,
                             booking_url=best_flight.get("booking_url", ""),
                             reasoning=(
@@ -219,7 +255,6 @@ class CalendarAgent(BaseAgent):
                             ) if is_last_leg else f"Connection via {leg_to}",
                         ))
                 else:
-                    # Fallback: single flight item
                     items.append(ItineraryItem(
                         id=uuid.uuid4().hex[:8],
                         day=day_num + 1,
@@ -228,185 +263,228 @@ class CalendarAgent(BaseAgent):
                         title=f"✈️ {best_flight.get('airline', 'Airline')}: {best_flight.get('departure_airport', '')} → {best_flight.get('arrival_airport', '')}",
                         category="flight",
                         description=f"{best_flight.get('stops', 0)} stop(s) · {best_flight.get('duration_minutes', 0) // 60}h ({total_pax} pax)",
-                        cost=flight_cost,
+                        location=day_city_name,
+                        cost=best_flight.get("price", 0) * cost_multiplier,
                         booking_url=best_flight.get("booking_url", ""),
                         reasoning=f"Best value flight × {total_pax} travelers",
                     ))
-                day_cost += flight_cost
+                day_cost += best_flight.get("price", 0) * cost_multiplier
 
-            # ── Hotel — show for every day ──
+            # ── Travel between cities ──
+            if city_changed and not is_first_day:
+                prev_name = prev_city.get("name", "")
+                dist = _haversine(
+                    prev_city.get("lat", 0), prev_city.get("lon", 0),
+                    day_city.get("lat", 0), day_city.get("lon", 0),
+                )
+                travel_hours = max(dist / 200, 1)  # rough estimate: 200 km/h average
+                items.append(ItineraryItem(
+                    id=uuid.uuid4().hex[:8],
+                    day=day_num + 1,
+                    start_time=dt_time(8, 0),
+                    end_time=dt_time(min(8 + int(travel_hours) + 1, 12), 0),
+                    title=f"🚅 Travel: {prev_name} → {day_city_name}",
+                    category="transport",
+                    description=f"~{dist:.0f} km · {travel_hours:.1f}h estimated travel time",
+                    location=day_city_name,
+                    latitude=day_city.get("lat", 0.0),
+                    longitude=day_city.get("lon", 0.0),
+                    cost=0,
+                    reasoning=f"Moving to {day_city_name} for the next leg of the trip",
+                ))
+
+            # ── Hotel ──
             if best_hotel:
                 hotel_cost_per_night = best_hotel.get("price_per_night", 0)
+                hotel_loc = f"{best_hotel.get('name', 'Hotel')}, {day_city_name}"
                 if is_first_day:
                     check_in_time = dt_time(max(post_arrival_hour, 14), 0)
                     items.append(ItineraryItem(
-                        id=uuid.uuid4().hex[:8],
-                        day=day_num + 1,
+                        id=uuid.uuid4().hex[:8], day=day_num + 1,
                         start_time=check_in_time,
                         end_time=dt_time(min(check_in_time.hour + 1, 23), 0),
                         title=f"🏨 Check in: {best_hotel.get('name', 'Hotel')}",
                         category="hotel",
                         description=f"⭐ {best_hotel.get('rating', 4.0)} · {', '.join(best_hotel.get('amenities', [])[:3])}",
                         cost=hotel_cost_per_night,
-                        location=best_hotel.get("address", ""),
+                        location=day_city_name,
                         latitude=best_hotel.get("latitude", 0.0),
                         longitude=best_hotel.get("longitude", 0.0),
                         booking_url=best_hotel.get("booking_url", ""),
-                        reasoning=f"Best rated hotel — ⭐ {best_hotel.get('rating', 4.0)} on Google Reviews",
+                        reasoning=f"Best rated hotel in {day_city_name} — ⭐ {best_hotel.get('rating', 4.0)}",
                     ))
                 elif is_last_day:
                     items.append(ItineraryItem(
-                        id=uuid.uuid4().hex[:8],
-                        day=day_num + 1,
-                        start_time=dt_time(11, 0),
-                        end_time=dt_time(12, 0),
+                        id=uuid.uuid4().hex[:8], day=day_num + 1,
+                        start_time=dt_time(11, 0), end_time=dt_time(12, 0),
                         title=f"🏨 Check out: {best_hotel.get('name', 'Hotel')}",
                         category="hotel",
                         description=f"⭐ {best_hotel.get('rating', 4.0)} · Check-out by noon",
                         cost=hotel_cost_per_night,
-                        location=best_hotel.get("address", ""),
+                        location=day_city_name,
                         latitude=best_hotel.get("latitude", 0.0),
                         longitude=best_hotel.get("longitude", 0.0),
                         booking_url=best_hotel.get("booking_url", ""),
                         reasoning="Check out and store luggage if needed",
                     ))
+                elif city_changed:
+                    # New city check-in
+                    items.append(ItineraryItem(
+                        id=uuid.uuid4().hex[:8], day=day_num + 1,
+                        start_time=dt_time(13, 0), end_time=dt_time(14, 0),
+                        title=f"🏨 Check in: {best_hotel.get('name', 'Hotel')}",
+                        category="hotel",
+                        description=f"⭐ {best_hotel.get('rating', 4.0)} · {', '.join(best_hotel.get('amenities', [])[:3])}",
+                        cost=hotel_cost_per_night,
+                        location=day_city_name,
+                        latitude=best_hotel.get("latitude", 0.0),
+                        longitude=best_hotel.get("longitude", 0.0),
+                        booking_url=best_hotel.get("booking_url", ""),
+                        reasoning=f"Best rated hotel in {day_city_name}",
+                    ))
                 else:
                     items.append(ItineraryItem(
-                        id=uuid.uuid4().hex[:8],
-                        day=day_num + 1,
-                        start_time=dt_time(7, 0),
-                        end_time=dt_time(8, 0),
+                        id=uuid.uuid4().hex[:8], day=day_num + 1,
+                        start_time=dt_time(7, 0), end_time=dt_time(8, 0),
                         title=f"🏨 {best_hotel.get('name', 'Hotel')}",
                         category="hotel",
                         description=f"⭐ {best_hotel.get('rating', 4.0)} · Night {day_num + 1} of {num_days}",
                         cost=hotel_cost_per_night,
-                        location=best_hotel.get("address", ""),
+                        location=day_city_name,
                         latitude=best_hotel.get("latitude", 0.0),
                         longitude=best_hotel.get("longitude", 0.0),
                         booking_url=best_hotel.get("booking_url", ""),
-                        reasoning=f"Best rated hotel — ⭐ {best_hotel.get('rating', 4.0)} on Google Reviews",
+                        reasoning=f"Best rated hotel in {day_city_name}",
                     ))
                 day_cost += hotel_cost_per_night
 
-            # ── Sightseeing activities (with realistic times based on arrival) ──
+            # ── Sightseeing activities ──
+            acts_per_day = 3
             if is_first_day and num_days > 1:
-                # After arrival + hotel check-in: 1 nearby activity
-                first_activity_hour = max(post_arrival_hour + 2, 15)  # at least 3pm
-                if first_activity_hour < 20:
-                    day_acts = day_groups[0][:1] if day_groups and day_groups[0] else []
-                    self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
-                                         start_times=[dt_time(first_activity_hour, 0)],
-                                         end_times=[dt_time(min(first_activity_hour + 2, 21), 0)],
-                                         cost_multiplier=cost_multiplier)
-                    day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
-                else:
-                    day_acts = []
+                first_activity_hour = max(post_arrival_hour + 2, 15)
+                if first_activity_hour < 20 and city_acts:
+                    chosen = city_acts[act_idx % len(city_acts)] if city_acts else None
+                    if chosen:
+                        self._add_activities(items, [chosen], day_num, is_rainy, indoor_acts, trip,
+                                             start_times=[dt_time(first_activity_hour, 0)],
+                                             end_times=[dt_time(min(first_activity_hour + 2, 21), 0)],
+                                             cost_multiplier=cost_multiplier, city_name=day_city_name)
+                        day_cost += chosen.get("price", 0) * cost_multiplier
+                        act_idx += 1
             elif is_last_day and num_days > 1:
-                day_acts = day_groups[day_num][:1] if day_num < len(day_groups) and day_groups[day_num] else []
-                self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
-                                     start_times=[dt_time(9, 0)],
-                                     end_times=[dt_time(11, 0)],
-                                     cost_multiplier=cost_multiplier)
-                day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
+                if city_acts:
+                    chosen = city_acts[act_idx % len(city_acts)]
+                    self._add_activities(items, [chosen], day_num, is_rainy, indoor_acts, trip,
+                                         start_times=[dt_time(9, 0)],
+                                         end_times=[dt_time(11, 0)],
+                                         cost_multiplier=cost_multiplier, city_name=day_city_name)
+                    day_cost += chosen.get("price", 0) * cost_multiplier
+                    act_idx += 1
             else:
-                # Full sightseeing day: 3 activities
-                group_idx = day_num
-                day_acts = day_groups[group_idx][:acts_per_day] if group_idx < len(day_groups) else []
-                self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
-                                     start_times=[dt_time(9, 30), dt_time(14, 0), dt_time(16, 0)],
-                                     end_times=[dt_time(11, 30), dt_time(15, 30), dt_time(17, 30)],
-                                     cost_multiplier=cost_multiplier)
-                day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
+                # Full day: up to 3 activities
+                day_acts_list: list[dict] = []
+                for _ in range(acts_per_day):
+                    if city_acts:
+                        day_acts_list.append(city_acts[act_idx % len(city_acts)])
+                        act_idx += 1
+                start_hour = 14 if city_changed else 9
+                s_times = [dt_time(start_hour, 30), dt_time(max(start_hour + 2, 14), 0), dt_time(16, 0)]
+                e_times = [dt_time(start_hour + 2, 0), dt_time(max(start_hour + 4, 15), 30), dt_time(17, 30)]
+                if city_changed:
+                    # After travel + check-in, only 2 activities
+                    day_acts_list = day_acts_list[:2]
+                    s_times = [dt_time(14, 30), dt_time(16, 30)]
+                    e_times = [dt_time(16, 0), dt_time(18, 0)]
+                self._add_activities(items, day_acts_list, day_num, is_rainy, indoor_acts, trip,
+                                     start_times=s_times, end_times=e_times,
+                                     cost_multiplier=cost_multiplier, city_name=day_city_name)
+                day_cost += sum(a.get("price", 0) for a in day_acts_list) * cost_multiplier
 
-            # ── Meals — every day gets lunch and dinner ──
-            if restaurants:
-                # Lunch
-                rest = restaurants[restaurant_idx % len(restaurants)]
+            city_act_idx[day_city_name] = act_idx
+
+            # ── Meals ──
+            if city_rests:
+                rest = city_rests[rest_idx % len(city_rests)]
                 if is_first_day:
                     lunch_hour = max(post_arrival_hour + 1, 13)
                     if lunch_hour > 15:
-                        lunch_hour = 13  # Too late for lunch after arrival, skip timing constraint
+                        lunch_hour = 13
                 else:
                     lunch_hour = 12
                 lunch_time = dt_time(min(lunch_hour, 15), 0)
                 lunch_cost = 25.0 * cost_multiplier
                 items.append(ItineraryItem(
-                    id=uuid.uuid4().hex[:8],
-                    day=day_num + 1,
+                    id=uuid.uuid4().hex[:8], day=day_num + 1,
                     start_time=lunch_time,
                     end_time=dt_time(lunch_time.hour + 1, 0),
-                    title=f"Lunch: {rest.get('name', 'Restaurant')}",
+                    title=f"🍽️ Lunch: {rest.get('name', 'Restaurant')}",
                     category="food",
                     description=f"{rest.get('cuisine', '')} cuisine — ⭐ {rest.get('rating', 4.0)}",
                     cost=lunch_cost,
-                    location=rest.get("address", ""),
+                    location=day_city_name,
                     latitude=rest.get("latitude", 0.0),
                     longitude=rest.get("longitude", 0.0),
                     booking_url=rest.get("booking_url", ""),
-                    reasoning=f"Highly rated {rest.get('cuisine', 'local')} restaurant — see Google reviews",
+                    reasoning=f"Highly rated {rest.get('cuisine', 'local')} restaurant in {day_city_name}",
                 ))
                 day_cost += lunch_cost
-                restaurant_idx += 1
+                rest_idx += 1
 
-                # Dinner
-                rest = restaurants[restaurant_idx % len(restaurants)]
+                rest = city_rests[rest_idx % len(city_rests)]
                 dinner_cost = 40.0 * cost_multiplier
                 items.append(ItineraryItem(
-                    id=uuid.uuid4().hex[:8],
-                    day=day_num + 1,
-                    start_time=dt_time(19, 0),
-                    end_time=dt_time(20, 30),
-                    title=f"Dinner: {rest.get('name', 'Restaurant')}",
+                    id=uuid.uuid4().hex[:8], day=day_num + 1,
+                    start_time=dt_time(19, 0), end_time=dt_time(20, 30),
+                    title=f"🍽️ Dinner: {rest.get('name', 'Restaurant')}",
                     category="food",
                     description=f"{rest.get('cuisine', '')} cuisine — ⭐ {rest.get('rating', 4.0)}",
                     cost=dinner_cost,
-                    location=rest.get("address", ""),
+                    location=day_city_name,
                     latitude=rest.get("latitude", 0.0),
                     longitude=rest.get("longitude", 0.0),
                     booking_url=rest.get("booking_url", ""),
-                    reasoning="Top-rated dinner spot — check Google Maps for reviews and photos",
+                    reasoning=f"Top-rated dinner spot in {day_city_name}",
                 ))
                 day_cost += dinner_cost
-                restaurant_idx += 1
+                rest_idx += 1
 
-            # ── Last day: departure flight ──
+            city_rest_idx[day_city_name] = rest_idx
+
+            # ── Last day: departure ──
             if is_last_day and best_flight:
-                # Return flight in the evening
                 items.append(ItineraryItem(
-                    id=uuid.uuid4().hex[:8],
-                    day=day_num + 1,
-                    start_time=dt_time(16, 0),
-                    end_time=dt_time(17, 0),
+                    id=uuid.uuid4().hex[:8], day=day_num + 1,
+                    start_time=dt_time(16, 0), end_time=dt_time(17, 0),
                     title="🚕 Transfer to airport",
                     category="transport",
                     description="Allow 1-2 hours before departure",
+                    location=day_city_name,
                     cost=0,
                     reasoning="Buffer time for airport transfer and check-in",
                 ))
                 items.append(ItineraryItem(
-                    id=uuid.uuid4().hex[:8],
-                    day=day_num + 1,
-                    start_time=dt_time(18, 0),
-                    end_time=dt_time(22, 0),
+                    id=uuid.uuid4().hex[:8], day=day_num + 1,
+                    start_time=dt_time(18, 0), end_time=dt_time(22, 0),
                     title=f"✈️ Return flight: {best_flight.get('arrival_airport', '')} → {best_flight.get('departure_airport', '')}",
                     category="flight",
                     description="Return journey",
+                    location=best_flight.get("arrival_airport", ""),
                     cost=0,
                     booking_url=best_flight.get("booking_url", ""),
                     reasoning="Return flight included in outbound booking",
                 ))
 
-            # Sort items by start_time for clean chronological order
             items.sort(key=lambda it: (it.start_time or dt_time(0, 0)))
 
-            # ── Day title ──
+            # ── Day title with city name ──
             if is_first_day:
-                day_title = f"Arrival in {destination}"
+                day_title = f"Arrival in {day_city_name}"
             elif is_last_day and num_days > 1:
-                day_title = f"Departure from {destination}"
+                day_title = f"Departure from {day_city_name}"
+            elif city_changed:
+                day_title = f"Travel to {day_city_name}"
             else:
-                planned_acts = day_groups[day_num] if day_num < len(day_groups) else []
-                day_title = _day_theme(planned_acts[:acts_per_day])
+                day_title = f"Exploring {day_city_name}"
 
             total_cost += day_cost
             days.append(DayPlan(
@@ -418,7 +496,11 @@ class CalendarAgent(BaseAgent):
                 daily_spend=day_cost,
             ))
 
-        # Packing list and checklist
+        # Build Google Maps route URL + city list for frontend map
+        map_url = _build_maps_url(ordered_cities, destination)
+        city_data = [{"name": c["name"], "lat": c.get("lat", 0), "lon": c.get("lon", 0)}
+                     for c in ordered_cities] if ordered_cities else []
+
         packing = self._generate_packing_list(trip, forecasts)
         checklist = self._generate_checklist(trip)
 
@@ -431,11 +513,14 @@ class CalendarAgent(BaseAgent):
             travel_time_hours=2.0 * num_days,
             packing_list=packing,
             checklist=checklist,
+            map_url=map_url,
+            cities=city_data,
         )
 
+        city_names = list(dict.fromkeys(cs.get("name", "") for cs in city_schedule))
         return {
             "itinerary": itinerary.model_dump(),
-            "summary": f"Built {num_days}-day itinerary with {sum(len(g) for g in day_groups)} sightseeing locations, ${total_cost:,.0f} total",
+            "summary": f"Built {num_days}-day itinerary visiting {', '.join(city_names)} — ${total_cost:,.0f} total",
         }
 
     async def _regenerate_single_day(self, context: dict[str, Any], day_num: int) -> dict[str, Any]:
@@ -555,9 +640,11 @@ class CalendarAgent(BaseAgent):
         start_times: list[dt_time],
         end_times: list[dt_time],
         cost_multiplier: float = 1.0,
+        city_name: str = "",
     ) -> None:
         """Add activity items to the day, handling weather substitution."""
         used_indoor: set[str] = set()
+        loc_label = city_name or trip.get("destination", "the area")
         for i, act in enumerate(day_acts):
             if i >= len(start_times):
                 break
@@ -566,7 +653,6 @@ class CalendarAgent(BaseAgent):
             chosen = act
 
             if is_rainy and act.get("weather_sensitive"):
-                # Find an indoor alternative not already used
                 alt = next(
                     (a for a in indoor_acts
                      if a.get("id") not in used_indoor and a.get("id") != act.get("id")),
@@ -595,11 +681,11 @@ class CalendarAgent(BaseAgent):
                 category="activity",
                 description=chosen.get("description", ""),
                 cost=chosen.get("price", 0) * cost_multiplier,
-                location=chosen.get("address", ""),
+                location=city_name or chosen.get("address", ""),
                 latitude=chosen.get("latitude", 0.0),
                 longitude=chosen.get("longitude", 0.0),
                 booking_url=chosen.get("booking_url", ""),
-                reasoning=f"Top-rated {chosen.get('category', 'attraction')} in {trip.get('destination', 'the area')}",
+                reasoning=f"Top-rated {chosen.get('category', 'attraction')} in {loc_label}",
                 weather_note=weather_note,
                 backup=backup_item,
             ))

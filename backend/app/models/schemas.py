@@ -195,6 +195,8 @@ class Itinerary(BaseModel):
     travel_time_hours: float = 0.0
     packing_list: list[str] = []
     checklist: list[str] = []
+    map_url: str = ""
+    cities: list[dict] = []
 
 
 # ── Budget ─────────────────────────────────────────────────────────────────────
