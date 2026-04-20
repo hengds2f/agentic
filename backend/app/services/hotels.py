@@ -126,8 +126,8 @@ out center {limit * 3};
             if len(hotels) >= limit:
                 break
 
-        # Sort by price
-        hotels.sort(key=lambda h: h.price_per_night)
+        # Sort by rating (best first)
+        hotels.sort(key=lambda h: h.rating, reverse=True)
 
         logger.info("hotels.found", destination=destination, count=len(hotels))
         return hotels

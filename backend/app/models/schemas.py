@@ -70,6 +70,15 @@ class TripRequest(BaseModel):
 # ── Search results ─────────────────────────────────────────────────────────────
 
 
+class FlightLeg(BaseModel):
+    departure_airport: str
+    arrival_airport: str
+    departure_time: datetime
+    arrival_time: datetime
+    airline: str = ""
+    duration_minutes: int = 0
+
+
 class FlightOption(BaseModel):
     id: str
     airline: str
@@ -82,6 +91,7 @@ class FlightOption(BaseModel):
     stops: int = 0
     duration_minutes: int = 0
     booking_url: str = ""
+    legs: list[FlightLeg] = []
 
 
 class HotelOption(BaseModel):

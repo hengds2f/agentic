@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date as dt_date, time as dt_time, timedelta
+from datetime import date as dt_date, datetime, time as dt_time, timedelta
 from math import atan2, cos, radians, sin, sqrt
 from typing import Any
 
@@ -77,8 +77,6 @@ class CalendarAgent(BaseAgent):
         trip = context["trip"]
 
         # ── Single-day regeneration ──
-        # When regenerating a specific day, keep existing itinerary intact
-        # and only rebuild the target day with fresh activity/food data.
         regen_day = context.get("regenerate_day")
         if regen_day and context.get("itinerary"):
             return await self._regenerate_single_day(context, regen_day)
@@ -106,39 +104,53 @@ class CalendarAgent(BaseAgent):
         num_adults = trip.get("num_adults", 1) or 1
         num_children = trip.get("num_children", 0) or 0
         total_pax = num_adults + num_children
-        # Children get half-price for activities and meals
         cost_multiplier = num_adults + num_children * 0.5
 
-        # Select best hotel
-        best_hotel = min(hotels, key=lambda h: h.get("price_per_night", 9999)) if hotels else None
+        # Select best-rated hotel (highest rating, not cheapest)
+        best_hotel = max(hotels, key=lambda h: h.get("rating", 0)) if hotels else None
 
         # Build forecast lookup
         forecast_map: dict[str, dict] = {}
         for f in forecasts:
             forecast_map[str(f.get("date", ""))] = f
 
+        # ── Determine flight arrival time for realistic Day 1 scheduling ──
+        best_flight = min(flights, key=lambda f: f["price"]) if flights else None
+        # Parse the arrival time to know when the traveler lands
+        arrival_hour = 12  # default noon if no flight info
+        arrival_minute = 0
+        if best_flight:
+            arr_time_str = best_flight.get("arrival_time", "")
+            try:
+                if isinstance(arr_time_str, str) and "T" in arr_time_str:
+                    arr_dt = datetime.fromisoformat(arr_time_str)
+                    arrival_hour = arr_dt.hour
+                    arrival_minute = arr_dt.minute
+                elif hasattr(arr_time_str, "hour"):
+                    arrival_hour = arr_time_str.hour
+                    arrival_minute = arr_time_str.minute
+            except (ValueError, TypeError):
+                pass
+
+        # Add ~1hr for immigration/baggage, round up
+        post_arrival_hour = arrival_hour + 1
+        post_arrival_minute = arrival_minute
+        if post_arrival_hour >= 24:
+            post_arrival_hour = 23
+            post_arrival_minute = 0
+
         # ── Cluster activities geographically into day groups ──
-        # Separate indoor vs outdoor for weather swapping
         indoor_acts = [a for a in activities if not a.get("weather_sensitive", False)]
-
-        # Every day gets sightseeing: arrival day gets 1, departure day gets 1,
-        # middle days get 3 each.
         acts_per_day = 3
-        # Number of activity groups = total days (every day gets planned)
         num_groups = max(num_days, 1)
-
-        # Cluster all activities into day groups for geographic proximity
         day_groups = _cluster_activities(list(activities), num_groups)
 
-        # Ensure each group has enough activities —
-        # borrow from larger groups, then cycle from master list
         for i, grp in enumerate(day_groups):
             while len(grp) < acts_per_day and any(len(g) > acts_per_day for g in day_groups):
                 donor = max(day_groups, key=len)
                 if len(donor) <= acts_per_day:
                     break
                 grp.append(donor.pop())
-            # If still short, cycle from the full activities list
             while len(grp) < acts_per_day and activities:
                 grp.append(activities[len(grp) % len(activities)])
 
@@ -157,54 +169,139 @@ class CalendarAgent(BaseAgent):
             is_first_day = day_num == 0
             is_last_day = day_num == num_days - 1
 
-            # ── Day 1: Arrival ──
-            if is_first_day and flights:
-                best_flight = min(flights, key=lambda f: f["price"])
+            # ── Day 1: Arrival flights ──
+            if is_first_day and best_flight:
                 flight_cost = best_flight.get("price", 0) * cost_multiplier
-                items.append(ItineraryItem(
-                    id=uuid.uuid4().hex[:8],
-                    day=day_num + 1,
-                    start_time=dt_time(8, 0),
-                    end_time=dt_time(12, 0),
-                    title=f"Flight: {best_flight.get('airline', 'Airline')}",
-                    category="flight",
-                    description=f"{best_flight.get('departure_airport', '')} → {best_flight.get('arrival_airport', '')} ({total_pax} pax)",
-                    cost=flight_cost,
-                    reasoning=f"Cheapest direct option for your dates × {total_pax} travelers",
-                ))
+                flight_legs = best_flight.get("legs", [])
+
+                if flight_legs:
+                    # Show each leg as a separate itinerary item
+                    for leg_idx, leg in enumerate(flight_legs):
+                        leg_dep = leg.get("departure_time", "")
+                        leg_arr = leg.get("arrival_time", "")
+                        leg_airline = leg.get("airline", best_flight.get("airline", "Airline"))
+
+                        # Parse leg times
+                        try:
+                            if isinstance(leg_dep, str) and "T" in leg_dep:
+                                dep_dt = datetime.fromisoformat(leg_dep)
+                            else:
+                                dep_dt = datetime.combine(current_date, dt_time(8, 0))
+                            if isinstance(leg_arr, str) and "T" in leg_arr:
+                                arr_dt = datetime.fromisoformat(leg_arr)
+                            else:
+                                arr_dt = dep_dt + timedelta(hours=3)
+                        except (ValueError, TypeError):
+                            dep_dt = datetime.combine(current_date, dt_time(8, 0))
+                            arr_dt = dep_dt + timedelta(hours=3)
+
+                        leg_from = leg.get("departure_airport", "")
+                        leg_to = leg.get("arrival_airport", "")
+                        is_last_leg = leg_idx == len(flight_legs) - 1
+
+                        items.append(ItineraryItem(
+                            id=uuid.uuid4().hex[:8],
+                            day=day_num + 1,
+                            start_time=dep_dt.time(),
+                            end_time=arr_dt.time(),
+                            title=f"✈️ {leg_airline}: {leg_from} → {leg_to}",
+                            category="flight",
+                            description=(
+                                f"Leg {leg_idx + 1} of {len(flight_legs)} · "
+                                f"{leg.get('duration_minutes', 0) // 60}h{leg.get('duration_minutes', 0) % 60:02d}m"
+                                + (f" ({total_pax} pax)" if is_last_leg else "")
+                            ),
+                            cost=flight_cost if is_last_leg else 0,
+                            booking_url=best_flight.get("booking_url", ""),
+                            reasoning=(
+                                f"{'Direct flight' if len(flight_legs) == 1 else f'{len(flight_legs)}-leg connection'} "
+                                f"× {total_pax} travelers"
+                            ) if is_last_leg else f"Connection via {leg_to}",
+                        ))
+                else:
+                    # Fallback: single flight item
+                    items.append(ItineraryItem(
+                        id=uuid.uuid4().hex[:8],
+                        day=day_num + 1,
+                        start_time=dt_time(8, 0),
+                        end_time=dt_time(arrival_hour, arrival_minute),
+                        title=f"✈️ {best_flight.get('airline', 'Airline')}: {best_flight.get('departure_airport', '')} → {best_flight.get('arrival_airport', '')}",
+                        category="flight",
+                        description=f"{best_flight.get('stops', 0)} stop(s) · {best_flight.get('duration_minutes', 0) // 60}h ({total_pax} pax)",
+                        cost=flight_cost,
+                        booking_url=best_flight.get("booking_url", ""),
+                        reasoning=f"Best value flight × {total_pax} travelers",
+                    ))
                 day_cost += flight_cost
 
-            # Hotel check-in on day 1
-            if is_first_day and best_hotel:
-                items.append(ItineraryItem(
-                    id=uuid.uuid4().hex[:8],
-                    day=day_num + 1,
-                    start_time=dt_time(14, 0),
-                    end_time=dt_time(15, 0),
-                    title=f"Check in: {best_hotel.get('name', 'Hotel')}",
-                    category="hotel",
-                    description=best_hotel.get("address", ""),
-                    cost=best_hotel.get("price_per_night", 0) * num_days,
-                    reasoning="Best value hotel with good reviews in your budget",
-                    location=best_hotel.get("address", ""),
-                ))
-                day_cost += best_hotel.get("price_per_night", 0)
+            # ── Hotel — show for every day ──
+            if best_hotel:
+                hotel_cost_per_night = best_hotel.get("price_per_night", 0)
+                if is_first_day:
+                    check_in_time = dt_time(max(post_arrival_hour, 14), 0)
+                    items.append(ItineraryItem(
+                        id=uuid.uuid4().hex[:8],
+                        day=day_num + 1,
+                        start_time=check_in_time,
+                        end_time=dt_time(min(check_in_time.hour + 1, 23), 0),
+                        title=f"🏨 Check in: {best_hotel.get('name', 'Hotel')}",
+                        category="hotel",
+                        description=f"⭐ {best_hotel.get('rating', 4.0)} · {', '.join(best_hotel.get('amenities', [])[:3])}",
+                        cost=hotel_cost_per_night,
+                        location=best_hotel.get("address", ""),
+                        latitude=best_hotel.get("latitude", 0.0),
+                        longitude=best_hotel.get("longitude", 0.0),
+                        booking_url=best_hotel.get("booking_url", ""),
+                        reasoning=f"Best rated hotel — ⭐ {best_hotel.get('rating', 4.0)} on Google Reviews",
+                    ))
+                elif is_last_day:
+                    items.append(ItineraryItem(
+                        id=uuid.uuid4().hex[:8],
+                        day=day_num + 1,
+                        start_time=dt_time(11, 0),
+                        end_time=dt_time(12, 0),
+                        title=f"🏨 Check out: {best_hotel.get('name', 'Hotel')}",
+                        category="hotel",
+                        description=f"⭐ {best_hotel.get('rating', 4.0)} · Check-out by noon",
+                        cost=hotel_cost_per_night,
+                        location=best_hotel.get("address", ""),
+                        latitude=best_hotel.get("latitude", 0.0),
+                        longitude=best_hotel.get("longitude", 0.0),
+                        booking_url=best_hotel.get("booking_url", ""),
+                        reasoning="Check out and store luggage if needed",
+                    ))
+                else:
+                    items.append(ItineraryItem(
+                        id=uuid.uuid4().hex[:8],
+                        day=day_num + 1,
+                        start_time=dt_time(7, 0),
+                        end_time=dt_time(8, 0),
+                        title=f"🏨 {best_hotel.get('name', 'Hotel')}",
+                        category="hotel",
+                        description=f"⭐ {best_hotel.get('rating', 4.0)} · Night {day_num + 1} of {num_days}",
+                        cost=hotel_cost_per_night,
+                        location=best_hotel.get("address", ""),
+                        latitude=best_hotel.get("latitude", 0.0),
+                        longitude=best_hotel.get("longitude", 0.0),
+                        booking_url=best_hotel.get("booking_url", ""),
+                        reasoning=f"Best rated hotel — ⭐ {best_hotel.get('rating', 4.0)} on Google Reviews",
+                    ))
+                day_cost += hotel_cost_per_night
 
-            # ── Sightseeing activities ──
-            # Day 1: one afternoon activity after check-in
-            # Middle days: 3 activities (morning, early PM, late PM)
-            # Last day: 1 morning activity before departure
-
+            # ── Sightseeing activities (with realistic times based on arrival) ──
             if is_first_day and num_days > 1:
-                # Arrival day: 1 nearby activity in the afternoon
-                day_acts = day_groups[0][:1] if day_groups and day_groups[0] else []
-                self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
-                                     start_times=[dt_time(15, 30)],
-                                     end_times=[dt_time(17, 30)],
-                                     cost_multiplier=cost_multiplier)
-                day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
+                # After arrival + hotel check-in: 1 nearby activity
+                first_activity_hour = max(post_arrival_hour + 2, 15)  # at least 3pm
+                if first_activity_hour < 20:
+                    day_acts = day_groups[0][:1] if day_groups and day_groups[0] else []
+                    self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
+                                         start_times=[dt_time(first_activity_hour, 0)],
+                                         end_times=[dt_time(min(first_activity_hour + 2, 21), 0)],
+                                         cost_multiplier=cost_multiplier)
+                    day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
+                else:
+                    day_acts = []
             elif is_last_day and num_days > 1:
-                # Departure day: 1 morning activity
                 day_acts = day_groups[day_num][:1] if day_num < len(day_groups) and day_groups[day_num] else []
                 self._add_activities(items, day_acts, day_num, is_rainy, indoor_acts, trip,
                                      start_times=[dt_time(9, 0)],
@@ -222,10 +319,16 @@ class CalendarAgent(BaseAgent):
                 day_cost += sum(a.get("price", 0) for a in day_acts) * cost_multiplier
 
             # ── Meals — every day gets lunch and dinner ──
-            # Cycle through restaurants if we run out
             if restaurants:
+                # Lunch
                 rest = restaurants[restaurant_idx % len(restaurants)]
-                lunch_time = dt_time(12, 0) if not is_first_day else dt_time(13, 0)
+                if is_first_day:
+                    lunch_hour = max(post_arrival_hour + 1, 13)
+                    if lunch_hour > 15:
+                        lunch_hour = 13  # Too late for lunch after arrival, skip timing constraint
+                else:
+                    lunch_hour = 12
+                lunch_time = dt_time(min(lunch_hour, 15), 0)
                 lunch_cost = 25.0 * cost_multiplier
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
@@ -245,6 +348,7 @@ class CalendarAgent(BaseAgent):
                 day_cost += lunch_cost
                 restaurant_idx += 1
 
+                # Dinner
                 rest = restaurants[restaurant_idx % len(restaurants)]
                 dinner_cost = 40.0 * cost_multiplier
                 items.append(ItineraryItem(
@@ -266,16 +370,29 @@ class CalendarAgent(BaseAgent):
                 restaurant_idx += 1
 
             # ── Last day: departure flight ──
-            if is_last_day and flights:
+            if is_last_day and best_flight:
+                # Return flight in the evening
+                items.append(ItineraryItem(
+                    id=uuid.uuid4().hex[:8],
+                    day=day_num + 1,
+                    start_time=dt_time(16, 0),
+                    end_time=dt_time(17, 0),
+                    title="🚕 Transfer to airport",
+                    category="transport",
+                    description="Allow 1-2 hours before departure",
+                    cost=0,
+                    reasoning="Buffer time for airport transfer and check-in",
+                ))
                 items.append(ItineraryItem(
                     id=uuid.uuid4().hex[:8],
                     day=day_num + 1,
                     start_time=dt_time(18, 0),
                     end_time=dt_time(22, 0),
-                    title="Return flight",
+                    title=f"✈️ Return flight: {best_flight.get('arrival_airport', '')} → {best_flight.get('departure_airport', '')}",
                     category="flight",
-                    description="Head to airport for departure",
+                    description="Return journey",
                     cost=0,
+                    booking_url=best_flight.get("booking_url", ""),
                     reasoning="Return flight included in outbound booking",
                 ))
 
@@ -288,7 +405,6 @@ class CalendarAgent(BaseAgent):
             elif is_last_day and num_days > 1:
                 day_title = f"Departure from {destination}"
             else:
-                # Use the activities planned for thematic title
                 planned_acts = day_groups[day_num] if day_num < len(day_groups) else []
                 day_title = _day_theme(planned_acts[:acts_per_day])
 
